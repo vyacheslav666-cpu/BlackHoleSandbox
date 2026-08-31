@@ -1,0 +1,20 @@
+# Build output
+out/
+build/
+_deps/
+CMakeUserPresets.json
+
+# Rendered images
+*.png
+*.jpg
+render*.png
+sheet/
+
+# Editor / IDE
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Runtime state
+imgui.ini
