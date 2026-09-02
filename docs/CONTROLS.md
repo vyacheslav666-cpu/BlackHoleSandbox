@@ -112,6 +112,24 @@ hunting magenta pixels.
 | **Pattern rotation rate** | How fast the pattern is advected. The *radial* dependence is the real Keplerian law `Ω ∝ r^-3/2`, so the inner disk shears past the outer disk correctly. |
 | **Prograde / Retrograde** | Flips the orbital direction — and with it, which side is Doppler-brightened. |
 
+### Accretion
+
+| Control | What it does |
+| --- | --- |
+| **Inflow rate** | Radial drift as a fraction of the orbital speed. Without it the turbulence circles forever instead of spiralling in. Feeds both the pattern motion and the Doppler shift. |
+| **Plunging region** | How far inside the ISCO the infalling gas keeps radiating, as a fraction of the gap to the horizon. Zero gives the classical sharp-edged thin disk. |
+
+### Relativistic jet
+
+| Control | What it does |
+| --- | --- |
+| **Power** | Overall brightness of the outflow. Zero removes it. |
+| **Powered by the spin** | Blandford–Znajek `a*²` scaling. With it on, a non-rotating hole has no jet — there is no rotational energy to extract. |
+| **Bulk Lorentz factor** | How fast the flow streams. This is what makes one jet bright and the counter-jet nearly invisible. |
+| **Length / Base radius / Collimation** | Geometry. Width grows as `height^collimation`; real jets are parabolic (`r ~ z^0.6`), not conical. |
+| **Colour temperature** | Tint only — synchrotron emission is not thermal. |
+| **Knots / turbulence** | Blobby structure, advected outwards with the flow. |
+
 ### Relativistic optics
 
 Each slider fades an effect out towards 1.0 (no shift) so it can be studied in
@@ -164,7 +182,7 @@ Four one-click shots: **Edge-on**, **Cinematic**, **High angle**, **Close pass**
 | **6 Doppler only** | The Doppler factor with gravitational redshift removed. |
 | **7 Closest approach** | Log-scaled closest approach, with bands at the photon sphere and the ISCO. |
 | **8 Background only** | The unobstructed lensed starfield. |
-| **9 Disk only** | The disk's own emission, sky removed. |
+| **9 Emission only** | The disk and jet emission alone, sky removed. |
 
 Debug modes only change how the trace result is displayed. The integrator is
 untouched, so what you measure in a debug view is what produced the final image.
@@ -199,7 +217,9 @@ BlackHoleSandbox.exe --shot render.png --width 1920 --height 1080 --samples 200 
 `--set` accepts: `rs`, `spin`, `ray-step`, `max-steps`, `escape-radius`, `disk-inner`,
 `disk-outer`, `disk-thickness`, `disk-flare`, `disk-brightness`,
 `disk-temperature`, `disk-density`, `disk-opacity`, `disk-turbulence`,
-`disk-direction`, `orbit-speed`, `doppler`, `gravitational-shift`, `beaming`,
+`disk-direction`, `orbit-speed`, `jet-power`, `jet-spin-scaling`,
+`jet-length`, `jet-radius`, `jet-collimation`, `jet-lorentz`,
+`jet-temperature`, `jet-turbulence`, `plunge`, `accretion-rate`, `doppler`, `gravitational-shift`, `beaming`,
 `star-density`, `nebula`, `spp`, `exposure`, `bloom`, `bloom-threshold`,
 `bloom-knee`, `bloom-scale`, `bloom-blend`, `bloom-levels`, `tone-mapper`,
 `render-scale`, `lock-isco`, `horizon-guide`, `photon-guide`.

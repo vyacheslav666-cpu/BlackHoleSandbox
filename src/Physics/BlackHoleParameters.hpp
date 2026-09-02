@@ -99,7 +99,7 @@ struct BlackHoleParameters {
     // Kerr geodesic solver.  Held just inside 1 because several Kerr formulae
     // are singular exactly at the extremal value; 0.998 is also the physical
     // "Thorne limit" that accretion is thought not to exceed.
-    float spin = 0.0f;
+    float spin = 0.7f;
 
     // ---- Ray integrator --------------------------------------------------
     float rayStep = 0.040f;   // Base RK4 angular increment dphi, in radians.
@@ -119,6 +119,29 @@ struct BlackHoleParameters {
     float diskTurbulence = 0.75f;
     float diskRotationDirection = 1.0f;
     float artisticOrbitSpeed = 0.65f;
+
+    // ---- Relativistic jet -------------------------------------------------
+    // A pair of collimated outflows along the spin axis.  Blandford-Znajek
+    // extracts rotational energy from the hole itself, with power going as
+    // a*^2, so by default the jet fades away entirely at zero spin.
+    float jetPower = 1.0f;
+    bool jetScalesWithSpin = true;   // Blandford-Znajek a*^2 scaling.
+    float jetLength = 90.0f;         // How far the outflow is drawn.
+    float jetBaseRadius = 0.32f;     // Width where it leaves the hole.
+    float jetCollimation = 0.55f;    // Radius grows as height^collimation.
+    float jetLorentz = 3.0f;         // Bulk Lorentz factor of the flow.
+    float jetTemperature = 16000.0f; // Colour only; synchrotron is not thermal.
+    float jetTurbulence = 0.7f;
+
+    // ---- Accretion dynamics ----------------------------------------------
+    // How far inside the ISCO the plunging gas keeps radiating, as a fraction
+    // of the gap between the ISCO and the horizon.  Zero reproduces the
+    // classical sharp-edged thin disk.
+    float plungeFraction = 0.7f;
+    // Radial drift speed of the accreting gas, as a fraction of the local
+    // orbital speed.  Real thin disks accrete very slowly; this is what makes
+    // the turbulence spiral inwards rather than circle forever.
+    float accretionRate = 0.06f;
 
     // ---- Relativistic optics (1 = full physical strength) ----------------
     float dopplerStrength = 1.0f;
@@ -175,6 +198,8 @@ struct BlackHoleParameters {
             diskInnerRadius = iscoRadius();
         }
         // The disk must stay outside the horizon whatever the user asks for.
+        // (The plunging region below the ISCO is handled in the shader, which
+        // fades emission out as it approaches the horizon.)
         diskInnerRadius = std::max(diskInnerRadius, 1.05f * horizonRadius());
         diskOuterRadius = std::max(diskOuterRadius, diskInnerRadius + 0.25f);
         diskHalfThickness = std::clamp(diskHalfThickness, 0.005f, 2.0f);
@@ -189,6 +214,17 @@ struct BlackHoleParameters {
         dopplerStrength = std::clamp(dopplerStrength, 0.0f, 1.0f);
         gravitationalShiftStrength = std::clamp(gravitationalShiftStrength, 0.0f, 1.0f);
         beamingStrength = std::clamp(beamingStrength, 0.0f, 1.0f);
+
+        jetPower = std::clamp(jetPower, 0.0f, 8.0f);
+        jetLength = std::clamp(jetLength, 2.0f, 400.0f);
+        jetBaseRadius = std::clamp(jetBaseRadius, 0.05f, 8.0f);
+        jetCollimation = std::clamp(jetCollimation, 0.0f, 1.2f);
+        jetLorentz = std::clamp(jetLorentz, 1.0f, 30.0f);
+        jetTemperature = std::clamp(jetTemperature, 1500.0f, 40000.0f);
+        jetTurbulence = std::clamp(jetTurbulence, 0.0f, 1.0f);
+
+        plungeFraction = std::clamp(plungeFraction, 0.0f, 1.0f);
+        accretionRate = std::clamp(accretionRate, 0.0f, 0.9f);
 
         starDensity = std::clamp(starDensity, 0.0f, 3.0f);
         nebulaStrength = std::clamp(nebulaStrength, 0.0f, 4.0f);

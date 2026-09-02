@@ -95,6 +95,21 @@ uniform float uDiskTurbulence;      // 0 = smooth analytic disk, 1 = full noise.
 uniform float uDiskRotationDirection;
 uniform float uArtisticOrbitSpeed;  // Pattern-rotation rate multiplier.
 
+// ---- Relativistic jet -------------------------------------------------------
+uniform float uJetPower;        // 0 disables the outflow entirely.
+uniform float uJetLength;
+uniform float uJetBaseRadius;
+uniform float uJetCollimation;  // radius ~ height^collimation
+uniform float uJetLorentz;      // Bulk Lorentz factor of the flow.
+uniform float uJetTemperature;  // Colour only; synchrotron is not thermal.
+uniform float uJetTurbulence;
+uniform int   uJetScalesWithSpin; // Blandford-Znajek a*^2 coupling.
+
+// ---- Accretion dynamics -----------------------------------------------------
+uniform float uPlungeFraction;  // How far inside the ISCO gas keeps radiating.
+uniform float uAccretionRate;   // Radial drift, as a fraction of orbital speed.
+uniform float uIscoRadius;      // Computed on the CPU; depends on the spin.
+
 // ---- Relativistic optics (1 = full physical strength, 0 = disabled) ---------
 // These exist so each effect can be isolated and studied, not to suggest the
 // physics is optional.
@@ -460,7 +475,13 @@ float diskTurbulence(float radius, float polar, float height, float innerRadius)
     float rotationDirection = uDiskRotationDirection < 0.0 ? -1.0 : 1.0;
     float keplerRate = pow(max(innerRadius / radius, 1e-3), 1.5);   // ~ Omega(r)
     float theta = polar - uTime * rotationDirection * max(uArtisticOrbitSpeed, 0.0) * keplerRate;
-    float logRadius = log(max(radius / innerRadius, 1.0));
+    // Advect the pattern *inwards* as well as around, so features visibly
+    // spiral towards the hole instead of orbiting forever. The drift is scaled
+    // by the same accretion rate that sets the radial velocity, which keeps the
+    // appearance and the Doppler shift telling the same story.
+    float inflow = uTime * max(uArtisticOrbitSpeed, 0.0) * clamp(uAccretionRate, 0.0, 0.9)
+                 * keplerRate * 0.6;
+    float logRadius = log(max(radius / innerRadius, 1.0)) + inflow;
 
     // Noise coordinate on a cylinder. The azimuth is sampled *around a circle*
     // so the pattern wraps seamlessly at 2*pi with no visible seam, and the
@@ -509,10 +530,25 @@ DiskSample sampleDisk(vec3 position, vec3 photonDir, float rs, float innerRadius
     result.shiftGravity = 1.0;
 
     float radius = length(position.xz);
-    if (radius < innerRadius || radius > outerRadius)
+
+    // ---- The plunging region ----------------------------------------------
+    // Inside the ISCO no stable circular orbit exists, so the gas stops
+    // orbiting and falls. It does not stop *existing*, though, and it does not
+    // stop radiating: it spirals inwards over a few orbits, thinning and
+    // dimming, until it crosses the horizon. Ignoring that leaves the classical
+    // thin disk with an unphysically sharp hole in the middle.
+    //
+    // uPlungeFraction says how far into the gap between the ISCO and the
+    // horizon that infalling gas is still drawn. Zero restores the sharp edge.
+    float horizonRadius = 0.5 * rs * (1.0 + sqrt(max(1.0 - uSpin * uSpin, 0.0)));
+    float plungeInner = mix(innerRadius, horizonRadius * 1.02,
+                            clamp(uPlungeFraction, 0.0, 1.0));
+    if (radius < plungeInner || radius > outerRadius)
     {
         return result;
     }
+    // 1 in the disk proper, ramping to 0 at the horizon.
+    float plunging = 1.0 - smoothstep(plungeInner, innerRadius, radius);
 
     // ---- Density -----------------------------------------------------------
     float baseHeight = configuredOr(uDiskHalfThickness, 0.1 * rs);
@@ -520,11 +556,20 @@ DiskSample sampleDisk(vec3 position, vec3 photonDir, float rs, float innerRadius
     float vertical = exp(-0.5 * (position.y * position.y) / max(scaleHeight * scaleHeight, 1e-8));
 
     float fluxProfile = thinDiskFluxProfile(radius, innerRadius);
+    // Inside the ISCO the zero-torque profile has nothing to say, so the
+    // plunging gas carries its ISCO-edge emissivity inwards while thinning out
+    // rapidly as it accelerates and its column depth collapses.
+    if (plunging > 0.0)
+    {
+        float plungeDepth = clamp((innerRadius - radius) / max(innerRadius - plungeInner, 1e-4), 0.0, 1.0);
+        fluxProfile = mix(fluxProfile, thinDiskFluxProfile(innerRadius * 1.02, innerRadius), plunging);
+        fluxProfile *= 1.0 - plungeDepth * plungeDepth;
+    }
 
     // Soften both rims so the disk does not end on a hard geometric edge.
     // (smoothstep requires edge0 < edge1, hence the explicit 1 - form.)
     float outerFade = 1.0 - smoothstep(mix(innerRadius, outerRadius, 0.86), outerRadius, radius);
-    float innerFade = smoothstep(innerRadius, innerRadius * 1.05, radius);
+    float innerFade = smoothstep(plungeInner, plungeInner * 1.06, radius);
 
     float polar = atan(position.z, position.x);
     float structure = diskTurbulence(radius, polar, position.y / max(scaleHeight, 1e-5), innerRadius);
@@ -602,6 +647,35 @@ DiskSample sampleDisk(vec3 position, vec3 photonDir, float rs, float innerRadius
     vec3 radialDirection = normalize(vec3(position.x, 0.0, position.z));
     vec3 orbitalDirection = normalize(cross(vec3(0.0, 1.0, 0.0), radialDirection));
 
+    // ---- Infall ------------------------------------------------------------
+    // Two things push the gas inwards.
+    //
+    //  * Accretion. A thin disk drifts inwards slowly -- viscous transport of
+    //    angular momentum -- so the radial speed is a small fraction of the
+    //    orbital speed. Without it the pattern would circle forever instead of
+    //    spiralling in, which is the visual difference between a rotating
+    //    texture and something actually falling into a black hole.
+    //  * The plunge. Inside the ISCO there is nothing left to hold the gas up
+    //    and it accelerates towards free fall. The Newtonian-limit escape speed
+    //    sqrt(r_s/r) is used as the scale here; it is a fair approximation well
+    //    outside the horizon and is clamped rather than allowed to reach 1.
+    float driftSpeed = clamp(uAccretionRate, 0.0, 0.9) * abs(beta);
+    if (plunging > 0.0)
+    {
+        float freeFall = sqrt(clamp(rs / max(radius, 1e-4), 0.0, 0.98));
+        driftSpeed = mix(driftSpeed, freeFall, plunging);
+    }
+    driftSpeed = min(driftSpeed, 0.97);
+
+    // Combine the orbital and radial motions into one velocity, then rebuild
+    // the Lorentz factor from the total speed. Doing it this way keeps the
+    // plunging gas relativistic in the right direction: mostly inwards, still
+    // partly swept around by what angular momentum it retains.
+    vec3 velocity = orbitalDirection * beta - radialDirection * driftSpeed;
+    float speed = min(length(velocity), 0.999);
+    lorentz = inversesqrt(max(1.0 - speed * speed, 1e-6));
+    vec3 flowDirection = speed > 1e-5 ? velocity / speed : orbitalDirection;
+
     // photonDir points camera -> scene; the photon that actually reaches the
     // camera travels the other way, so the direction *towards the observer* is
     // its negative. Using the locally integrated direction (not the straight
@@ -609,7 +683,7 @@ DiskSample sampleDisk(vec3 position, vec3 photonDir, float rs, float innerRadius
     // lensed image rather than the screen.
     vec3 toObserver = -photonDir;
 
-    float doppler = 1.0 / max(lorentz * (1.0 - beta * dot(orbitalDirection, toObserver)), 1e-4);
+    float doppler = 1.0 / max(lorentz * (1.0 - speed * dot(flowDirection, toObserver)), 1e-4);
     float gravity = lapse;
 
     // Blending towards 1.0 lets each effect be dialled down for study.
@@ -653,6 +727,200 @@ DiskSample sampleDisk(vec3 position, vec3 photonDir, float rs, float innerRadius
     result.shiftDoppler = doppler;
     result.shiftGravity = gravity;
     return result;
+}
+
+// =============================================================================
+// Relativistic jet
+// =============================================================================
+//
+// A pair of collimated outflows along the spin axis.
+//
+// WHERE THE ENERGY COMES FROM. The Blandford-Znajek mechanism taps the *hole's
+// own rotation*: magnetic field lines threading the horizon are wound up by
+// frame dragging and carry away rotational energy, with power scaling as
+//
+//     P_BZ  ~  a*^2 B^2 M^2
+//
+// The a*^2 is why the jet here fades out entirely as the spin goes to zero --
+// a non-rotating black hole has no rotational energy to extract. That coupling
+// is switchable in the UI, but leaving it on is the physical behaviour, and it
+// is the reason the spin slider and the jet slider are related at all.
+//
+// WHAT IS MODELLED AND WHAT IS NOT. The *geometry* is phenomenological: a
+// parabolic envelope fitted to what jets are observed to look like, not the
+// solution of any equation. The *kinematics and brightness* are real special
+// relativity: the flow moves at a bulk Lorentz factor, and the resulting
+// Doppler boost is what makes one jet blindingly bright and the counter-jet
+// nearly invisible -- exactly the asymmetry seen in M87. Nothing here solves
+// magnetohydrodynamics; that is a supercomputer problem, not a shader.
+
+// Half-width of the outflow at a given height above the equatorial plane.
+// Real jets are collimated parabolically -- M87's is measured at roughly
+// r ~ z^0.6 -- rather than opening as a straight cone.
+float jetRadiusAtHeight(float height, float baseRadius, float collimation)
+{
+    return baseRadius * pow(max(height, 1e-3), clamp(collimation, 0.0, 1.2));
+}
+
+// Emission from the outflow at one point. Returns radiance per unit length;
+// the jet is treated as optically thin, which is right for synchrotron
+// emission at these densities.
+vec3 sampleJet(vec3 position, vec3 photonDir, float rs, float spinStar)
+{
+    float power = max(uJetPower, 0.0);
+    if (power <= 0.0)
+    {
+        return vec3(0.0);
+    }
+
+    float height = abs(position.y);
+    float jetLength = max(uJetLength, 1.0);
+    if (height > jetLength)
+    {
+        return vec3(0.0);
+    }
+
+    // The base sits just outside the horizon; below that there is no outflow,
+    // only infall.
+    float launchRadius = 1.2 * rs;
+    if (height < launchRadius * 0.35)
+    {
+        return vec3(0.0);
+    }
+
+    float cylindrical = length(position.xz);
+    float width = jetRadiusAtHeight(height, max(uJetBaseRadius, 0.02), uJetCollimation);
+    float normalized = cylindrical / max(width, 1e-4);
+    if (normalized > 1.8)
+    {
+        return vec3(0.0);
+    }
+
+    // A limb-brightened shell rather than a filled cone: the emission in real
+    // jets is concentrated towards the walls, which is why they photograph as
+    // two rails rather than a solid beam.
+    float shell = exp(-pow(abs(normalized - 0.75) / 0.28, 2.0));
+    float core = 0.25 * exp(-normalized * normalized * 2.4);
+    float profile = shell + core;
+
+    // Fade in at the base and out at the tip so the outflow has no hard ends.
+    float baseFade = smoothstep(launchRadius * 0.35, launchRadius * 1.8, height);
+    float tipFade = 1.0 - smoothstep(jetLength * 0.55, jetLength, height);
+
+    // Density drops as the flow expands and spreads its material over a wider
+    // cross-section.
+    float dilution = 1.0 / (1.0 + pow(height / max(3.0 * launchRadius, 1e-3), 1.35));
+
+    // Knots and helical structure. Advected outwards with the flow, so the
+    // pattern travels along the jet rather than sitting still.
+    float turbulence = 1.0;
+    float amount = clamp(uJetTurbulence, 0.0, 1.0);
+    if (amount > 0.0)
+    {
+        // Advected with the flow, so knots travel outwards rather than sitting
+        // still. The frequency is deliberately low: a jet's structure is a few
+        // big blobs, and a high frequency here just aliases into stripes.
+        float travel = height - uTime * 1.6;
+        float twist = atan(position.z, position.x) - height * 0.12;
+        vec3 noiseP = vec3(cos(twist), sin(twist), 0.0) * 0.8
+                    + vec3(0.0, 0.0, travel * 0.16);
+        float knots = fbm3(noiseP, 3);
+        turbulence = mix(1.0, mix(0.45, 1.75, knots), amount);
+    }
+
+    float density = profile * baseFade * tipFade * dilution * turbulence;
+    if (density <= 1e-5)
+    {
+        return vec3(0.0);
+    }
+
+    // ---- Relativistic beaming ----------------------------------------------
+    // The flow streams away from the hole along the axis at a bulk Lorentz
+    // factor Gamma. For a *continuous* jet the observed intensity is boosted by
+    //
+    //     delta^(2 + alpha)
+    //
+    // with delta the Doppler factor and alpha the synchrotron spectral index
+    // (about 0.7 for these sources). The exponent is 2+alpha rather than the
+    // 4 used for the thermal disk because a steady jet is a standing structure,
+    // not a set of discrete blobs -- one power of delta is lost to the fact
+    // that the emitting volume is fixed in the observer's frame.
+    float lorentz = max(uJetLorentz, 1.0);
+    float beta = sqrt(max(1.0 - 1.0 / (lorentz * lorentz), 0.0));
+    vec3 flowDirection = vec3(0.0, position.y >= 0.0 ? 1.0 : -1.0, 0.0);
+    vec3 toObserver = -photonDir;
+
+    float doppler = 1.0 / max(lorentz * (1.0 - beta * dot(flowDirection, toObserver)), 1e-3);
+    const float kSpectralIndex = 0.7;
+    float boost = pow(doppler, 2.0 + kSpectralIndex);
+
+    // Gravitational redshift on the way out. Far up the jet this is ~1.
+    float radius = max(length(position), rs * 1.0001);
+    float gravity = sqrt(max(1.0 - rs / radius, 1e-4));
+    boost *= pow(gravity, 2.0 + kSpectralIndex);
+
+    // Blandford-Znajek: the power available scales as a*^2.
+    float spinScaling = uJetScalesWithSpin != 0 ? spinStar * spinStar : 1.0;
+
+    vec3 colour = blackbodyRgb(max(uJetTemperature, 1500.0) * clamp(doppler, 0.3, 3.0));
+
+    // Overall scale. Synchrotron emissivity has no natural normalisation the
+    // way a blackbody does -- there is no temperature to anchor it to -- so
+    // this constant simply puts a side-on jet at a brightness comparable with
+    // the disk at the default settings. It is a units choice; every *relative*
+    // variation (the beaming asymmetry, the fall-off along the flow, the a*^2
+    // scaling) is the physical one.
+    const float kJetEmissivity = 45.0;
+    return colour * density * boost * spinScaling * power * kJetEmissivity;
+}
+
+// Accumulate jet emission along one trajectory segment.
+//
+// Unlike the disk, the jet is optically thin -- it adds light but absorbs
+// almost none -- so this only ever brightens the ray. It still respects the
+// transmittance already accumulated by the disk, because an opaque disk in
+// front genuinely does hide the outflow behind it.
+void accumulateJetSegment(vec3 pointA, vec3 pointB, float rs, float spinStar,
+                          inout TraceResult trace)
+{
+    if (uJetPower <= 0.0)
+    {
+        return;
+    }
+
+    vec3 delta = pointB - pointA;
+    float segmentLength = length(delta);
+    if (segmentLength < 1e-7)
+    {
+        return;
+    }
+
+    // Cheap rejection: if both endpoints are far outside the widest the jet
+    // ever gets, nothing along the chord can be inside it either.
+    float jetLength = max(uJetLength, 1.0);
+    float widest = jetRadiusAtHeight(jetLength, max(uJetBaseRadius, 0.02), uJetCollimation) * 2.5;
+    bool aOutside = abs(pointA.y) > jetLength || length(pointA.xz) > widest;
+    bool bOutside = abs(pointB.y) > jetLength || length(pointB.xz) > widest;
+    if (aOutside && bOutside)
+    {
+        return;
+    }
+
+    vec3 direction = delta / segmentLength;
+
+    // Sample count follows the segment length measured against the jet's own
+    // width. Far from the hole the integrator takes long strides, and a fixed
+    // handful of samples there shows up as visible banding along the outflow.
+    float scale = max(uJetBaseRadius, 0.05) * 3.0;
+    int sampleCount = int(clamp(ceil(segmentLength / scale), 1.0, 8.0));
+    float ds = segmentLength / float(sampleCount);
+    for (int i = 0; i < 8; ++i)
+    {
+        if (i >= sampleCount) break;
+        vec3 position = pointA + delta * ((float(i) + 0.5) / float(sampleCount));
+        trace.diskRadiance += sampleJet(position, direction, rs, spinStar)
+                            * trace.transmittance * ds;
+    }
 }
 
 // =============================================================================
@@ -1017,6 +1285,7 @@ TraceResult traceSchwarzschild(vec3 rayOrigin, vec3 initialDirection, bool ignor
             // gravitational redshift, with no Doppler term.
             accumulateDiskSegment(rayOrigin, endpoint,
                                   rs, innerRadius, outerRadius, slabHalfHeight, trace);
+            accumulateJetSegment(rayOrigin, endpoint, rs, 0.0, trace);
         }
         trace.steps = 1;
         trace.state = inbound ? kTraceCaptured : kTraceEscaped;
@@ -1113,6 +1382,9 @@ TraceResult traceSchwarzschild(vec3 rayOrigin, vec3 initialDirection, bool ignor
         {
             accumulateDiskSegment(previousPosition, currentPosition,
                                   rs, innerRadius, outerRadius, slabHalfHeight, trace);
+            // Spin is zero on this path, so the jet only appears here if the
+            // Blandford-Znajek coupling has been switched off in the UI.
+            accumulateJetSegment(previousPosition, currentPosition, rs, 0.0, trace);
             if (trace.transmittance < 0.002)
             {
                 // Fully absorbed: whatever lies beyond cannot be seen. Report
@@ -1283,6 +1555,7 @@ TraceResult traceKerr(vec3 rayOrigin, vec3 initialDirection, bool ignoreDisk)
         {
             accumulateDiskSegment(previousWorld, currentWorld,
                                   rs, innerRadius, outerRadius, slabHalfHeight, trace);
+            accumulateJetSegment(previousWorld, currentWorld, rs, spinStar, trace);
             if (trace.transmittance < 0.002)
             {
                 trace.state = kTraceEscaped;

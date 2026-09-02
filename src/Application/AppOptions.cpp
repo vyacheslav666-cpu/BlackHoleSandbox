@@ -55,6 +55,16 @@ void applyNamedParameter(physics::BlackHoleParameters& p, std::string_view name,
     else if (name == "disk-turbulence")     p.diskTurbulence = number();
     else if (name == "disk-direction")      p.diskRotationDirection = number();
     else if (name == "orbit-speed")         p.artisticOrbitSpeed = number();
+    else if (name == "jet-power")           p.jetPower = number();
+    else if (name == "jet-spin-scaling")    p.jetScalesWithSpin = toBool(value);
+    else if (name == "jet-length")          p.jetLength = number();
+    else if (name == "jet-radius")          p.jetBaseRadius = number();
+    else if (name == "jet-collimation")     p.jetCollimation = number();
+    else if (name == "jet-lorentz")         p.jetLorentz = number();
+    else if (name == "jet-temperature")     p.jetTemperature = number();
+    else if (name == "jet-turbulence")      p.jetTurbulence = number();
+    else if (name == "plunge")              p.plungeFraction = number();
+    else if (name == "accretion-rate")      p.accretionRate = number();
     else if (name == "doppler")             p.dopplerStrength = number();
     else if (name == "gravitational-shift") p.gravitationalShiftStrength = number();
     else if (name == "beaming")             p.beamingStrength = number();

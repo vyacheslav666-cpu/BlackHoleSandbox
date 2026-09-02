@@ -397,6 +397,16 @@ std::uint64_t Application::renderStateFingerprint() const {
     f.add(p.diskTurbulence);
     f.add(p.diskRotationDirection);
     f.add(p.artisticOrbitSpeed);
+    f.add(p.jetPower);
+    f.add(p.jetScalesWithSpin);
+    f.add(p.jetLength);
+    f.add(p.jetBaseRadius);
+    f.add(p.jetCollimation);
+    f.add(p.jetLorentz);
+    f.add(p.jetTemperature);
+    f.add(p.jetTurbulence);
+    f.add(p.plungeFraction);
+    f.add(p.accretionRate);
     f.add(p.dopplerStrength);
     f.add(p.gravitationalShiftStrength);
     f.add(p.beamingStrength);
@@ -460,6 +470,19 @@ void Application::renderScene(float animationTime) {
     blackHoleProgram_.setFloat("uDiskTurbulence", p.diskTurbulence);
     blackHoleProgram_.setFloat("uDiskRotationDirection", p.diskRotationDirection);
     blackHoleProgram_.setFloat("uArtisticOrbitSpeed", p.artisticOrbitSpeed);
+
+    blackHoleProgram_.setFloat("uJetPower", p.jetPower);
+    blackHoleProgram_.setInt("uJetScalesWithSpin", p.jetScalesWithSpin ? 1 : 0);
+    blackHoleProgram_.setFloat("uJetLength", p.jetLength);
+    blackHoleProgram_.setFloat("uJetBaseRadius", p.jetBaseRadius);
+    blackHoleProgram_.setFloat("uJetCollimation", p.jetCollimation);
+    blackHoleProgram_.setFloat("uJetLorentz", p.jetLorentz);
+    blackHoleProgram_.setFloat("uJetTemperature", p.jetTemperature);
+    blackHoleProgram_.setFloat("uJetTurbulence", p.jetTurbulence);
+
+    blackHoleProgram_.setFloat("uPlungeFraction", p.plungeFraction);
+    blackHoleProgram_.setFloat("uAccretionRate", p.accretionRate);
+    blackHoleProgram_.setFloat("uIscoRadius", p.iscoRadius());
 
     blackHoleProgram_.setFloat("uDopplerStrength", p.dopplerStrength);
     blackHoleProgram_.setFloat("uGravitationalShiftStrength", p.gravitationalShiftStrength);

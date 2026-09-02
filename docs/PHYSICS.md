@@ -525,7 +525,117 @@ the receding side goes warm. Both fall straight out of the equations above.
 
 ---
 
-## 5. Everything else
+## 5. Accretion and outflow
+
+### 5.1 The plunging region — **DERIVED** in outline, **NUMERICAL** in detail
+
+The zero-torque thin disk of §3.2 ends abruptly at the ISCO, and the classical
+picture leaves a sharp hole in the middle. That is not what happens. Inside the
+ISCO no stable circular orbit exists, so the gas stops orbiting and falls — but
+it does not stop *existing*, and it does not stop radiating. It spirals inwards
+over a few orbits, thinning and dimming, until it crosses the horizon.
+
+The renderer continues the disk inwards from the ISCO towards the horizon,
+controlled by **Plunging region** (zero restores the sharp edge). Inside it:
+
+* the emissivity carries the ISCO-edge value inwards and then falls off as the
+  gas accelerates and its column depth collapses;
+* the velocity blends from orbital towards radial free fall, so the Doppler
+  shift changes character — the plunging gas is moving mostly *inwards*, not
+  around, and is redshifted accordingly.
+
+What is derived: that there are no circular orbits below the ISCO, and that the
+infall speed approaches free fall. What is approximated: the free-fall scale
+uses the Newtonian `sqrt(r_s/r)`, which is fair well outside the horizon and is
+clamped rather than allowed to reach 1; and the emissivity fall-off is a fitted
+shape, not a solution of the transfer problem in the plunging flow.
+
+### 5.2 Inflow — **ARTISTIC**, physically anchored
+
+A real thin disk accretes slowly: the radial drift is a small fraction of the
+orbital speed, set by how efficiently viscosity transports angular momentum.
+The **Inflow rate** slider sets that fraction directly.
+
+It does two things at once, and deliberately the same two: it advects the
+turbulence pattern inwards, so features visibly spiral towards the hole instead
+of orbiting forever, *and* it adds a radial component to the velocity that the
+Doppler calculation sees. The appearance and the physics therefore always agree
+— if it looks like it is falling in, it is being Doppler-shifted as though it
+were falling in.
+
+The actual value is a slider, not a derivation. Deriving it needs the disk's
+viscosity, which needs magnetohydrodynamics.
+
+### 5.3 The relativistic jet
+
+**Where the energy comes from — DERIVED.** The Blandford–Znajek mechanism taps
+the *hole's own rotation*: magnetic field lines threading the horizon are wound
+up by frame dragging and carry rotational energy away, with power scaling as
+
+```
+P_BZ  ~  a*² B² M²
+```
+
+The `a*²` is why the jet fades out entirely as the spin goes to zero — a
+non-rotating black hole has no rotational energy to extract. That coupling is
+switchable in the UI, but leaving it on is the physical behaviour, and it is the
+reason the spin slider and the jet slider are related at all.
+
+**Beaming — DERIVED.** The flow streams along the axis at a bulk Lorentz factor
+Γ. For a *continuous* jet the observed intensity is boosted by
+
+```
+δ^(2 + α)
+```
+
+with δ the Doppler factor and α ≈ 0.7 the synchrotron spectral index. The
+exponent is `2 + α` rather than the `4` used for the thermal disk because a
+steady jet is a standing structure rather than a set of discrete blobs: one
+power of δ is lost because the emitting volume is fixed in the observer's frame.
+
+This is the whole reason one jet is blindingly bright and the counter-jet nearly
+invisible. A modest difference in viewing angle becomes a large difference in
+brightness — exactly the asymmetry seen in M87. Point the camera near the axis
+and the near jet saturates while the far one almost vanishes; swing round to
+edge-on and they even out.
+
+**Geometry — ARTISTIC.** A parabolic envelope, `radius ~ height^collimation`,
+fitted to what jets are observed to look like rather than solved for. The
+default exponent of about 0.55 is close to the measured collimation profile of
+M87's jet (`r ~ z^0.6`). The limb-brightened shell — emission concentrated
+towards the walls rather than filling the cone — is likewise phenomenological,
+though it is what makes real jets photograph as two rails rather than a solid
+beam. The knots are advected noise.
+
+**Radiation — ARTISTIC.** Synchrotron emission is not thermal, so there is no
+temperature to anchor the brightness to the way there is for the disk. The
+colour is a tint chosen on the Planck locus, and the overall emissivity is a
+units constant picked so a side-on jet is comparable in brightness with the
+disk. Every *relative* variation — the beaming asymmetry, the fall-off along the
+flow, the `a*²` scaling — is the physical one.
+
+**Optically thin.** The jet adds light but absorbs almost none, which is right
+for synchrotron emission at these densities. It still respects transmittance
+already accumulated by the disk, because an opaque disk in front genuinely does
+hide the outflow behind it.
+
+### 5.4 What "forming an accretion disk" would actually take
+
+The disk here is a *steady* structure with procedural turbulence: it does not
+form, and matter does not accumulate into it. Genuinely simulating that means
+general-relativistic magnetohydrodynamics — following magnetised fluid through
+curved spacetime, resolving the magnetorotational instability that drives the
+viscosity in the first place. Codes like HARM and BHAC do it, and a single run
+takes days on a cluster. What they produce is then *fed into* a ray tracer very
+much like this one.
+
+So the honest split is: this renderer does the radiative transfer and the
+geodesics that such a pipeline would do, and substitutes an analytic disk plus
+procedural turbulence for the fluid dynamics that it would otherwise import.
+
+---
+
+## 6. Everything else
 
 | Feature | Tag | Note |
 | --- | --- | --- |
@@ -538,7 +648,7 @@ the receding side goes warm. Both fall straight out of the equations above.
 
 ---
 
-## 6. What this renderer does **not** do
+## 7. What this renderer does **not** do
 
 Stated plainly, so nothing here is oversold:
 
@@ -546,18 +656,20 @@ Stated plainly, so nothing here is oversold:
   arrive, so a truly consistent animation would show the far image lagging.
   The renderer evaluates the disk pattern at a single global time. This is the
   largest remaining gap.
-* **No plunging region.** Matter inside the ISCO still spirals in and radiates;
-  the disk model simply stops there.
 * **No Reissner–Nordström or Kerr–Newman.** The hole is electrically neutral.
 * **No self-illumination or returning radiation.** In reality a good fraction
   of the disk's light bends back onto the disk and is re-emitted. Not modelled.
 * **No emission below the ISCO**, no jets, no corona, no Comptonisation.
 * **No polarisation**, and no wavelength-dependent opacity.
 * **Not spectrally rendered** — see §4.3.
+* **No magnetohydrodynamics.** The disk does not form and matter does not
+  accumulate into it; the turbulence is procedural, not a solved flow. See §5.4.
+* **No jet launching physics.** The Blandford-Znajek *scaling* is used, but no
+  magnetic field is modelled and nothing is actually accelerated. See §5.3.
 
 ---
 
-## 7. Checking the claims yourself
+## 8. Checking the claims yourself
 
 | Question | How to check |
 | --- | --- |
@@ -566,4 +678,6 @@ Stated plainly, so nothing here is oversold:
 | Is the photon sphere real? | Debug view 2. The bright ring is where rays needed the most integration steps — i.e. where they wound around `r = 1.5 r_s`. Debug view 7 confirms their closest approach converges there. |
 | Is the Doppler shift real or painted on? | Debug view 6, then orbit the camera. The blue/red split follows the *lensed* disk around the hole and inverts when you switch to Retrograde. |
 | Is the spin doing anything real? | Set Spin to 0.998, Density to 0, and open debug view 3. The shadow is displaced sideways and flattened on one side. Flip the spin to -0.998: it mirrors exactly. A circle cannot do that. |
+| Is the jet beaming real? | Point the camera near the spin axis: the near jet saturates and the counter-jet almost vanishes. Swing round to edge-on and they even out. Nothing in the shader knows which jet is which -- only the viewing angle changes. |
+| Is the jet really tied to the spin? | Leave "Powered by the spin" on and drag Spin to zero. The jet disappears entirely, because Blandford-Znajek power goes as a*^2. |
 | Is the integrator converged? | Debug view 3 again: magenta pixels mean the step budget ran out. Raise **Max RK4 steps** until they disappear, then compare renders at Low and Ultra — the geometry should not move. |

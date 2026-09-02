@@ -93,12 +93,17 @@ renders to identical bytes twice in a row. Details in
 | Gravitational redshift | The Kerr lapse `α = sqrt(r²Δ/A)`, reducing to `sqrt(1 - r_s/r)` without spin |
 | Frame dragging | The ZAMO velocity subtracts the dragging rate `ω = 2aMr/A`, so only motion the local observer can see counts |
 | Relativistic beaming | `I_obs = g⁴ I_emit`, self-consistent with the temperature shift |
+| Plunging region | Gas keeps radiating inside the ISCO, blending from orbital to radial infall |
+| Accretion inflow | Radial drift that advects the turbulence *and* feeds the Doppler shift |
+| Relativistic jet | Collimated outflow along the spin axis, powered by Blandford–Znajek `a*²`, beamed by `δ^(2+α)` |
 | Anti-aliasing | Progressive refinement over Halton-jittered sub-pixel samples |
 | Post-processing | Multi-level bloom pyramid, ACES / Reinhard / Uncharted 2, dither |
 | Debug views | Ten, covering classification, step count, optical depth and both frequency shifts |
 
 Not implemented, and deliberately so: light travel-time delay, returning
-radiation, polarisation, spectral rendering, the plunging region.
+radiation, polarisation, spectral rendering, and any actual
+magnetohydrodynamics — the disk is a steady analytic structure, not a solved
+flow.
 See [docs/PHYSICS.md §6](docs/PHYSICS.md#6-what-this-renderer-does-not-do).
 
 Architecture and render-pass details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

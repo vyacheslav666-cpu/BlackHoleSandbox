@@ -22,7 +22,7 @@ constexpr std::array<const char*, 10> kDebugLabels = {
     "6  Doppler factor only",
     "7  Closest approach / landmark radii",
     "8  Background only (no disk)",
-    "9  Accretion disk only",
+    "9  Emission only (disk + jet)",
 };
 
 constexpr std::array<const char*, 10> kDebugDescriptions = {
@@ -37,7 +37,7 @@ constexpr std::array<const char*, 10> kDebugDescriptions = {
     "Closest approach of each ray, log-scaled. Bright bands mark rays that\n"
     "grazed the photon sphere (1.5 r_s, orange) or the ISCO (3 r_s, blue).",
     "The unobstructed lensed starfield.",
-    "Only the disk's own emission, with the sky removed.",
+    "The disk and jet emission alone, with the sky removed.",
 };
 
 constexpr std::array<const char*, 3> kToneMapperLabels = {"ACES (fitted)", "Reinhard",
@@ -252,6 +252,58 @@ ControlPanelActions ControlPanel::draw(bool& visible, physics::BlackHoleParamete
         if (ImGui::RadioButton("Retrograde", p.diskRotationDirection < 0.0f)) {
             p.diskRotationDirection = -1.0f;
         }
+    }
+
+    // ---- Accretion dynamics ----------------------------------------------
+    if (ImGui::CollapsingHeader("Accretion", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::SliderFloat("Inflow rate", &p.accretionRate, 0.0f, 0.6f, "%.3f");
+        helpMarker("Radial drift of the gas, as a fraction of the local orbital\n"
+                   "speed. A real thin disk accretes slowly, but without any drift\n"
+                   "the turbulence would circle forever instead of spiralling in --\n"
+                   "the visual difference between a rotating texture and something\n"
+                   "actually falling in. It feeds both the pattern motion and the\n"
+                   "Doppler shift, so the two always tell the same story.");
+        ImGui::SliderFloat("Plunging region", &p.plungeFraction, 0.0f, 1.0f, "%.2f");
+        helpMarker("Inside the ISCO nothing holds the gas up and it falls. It does\n"
+                   "not stop radiating, though: it spirals in over a few orbits,\n"
+                   "thinning and dimming, until it crosses the horizon.\n\n"
+                   "This sets how far into the gap between the ISCO and the horizon\n"
+                   "that infalling gas is still drawn. Zero gives the classical thin\n"
+                   "disk with a sharp hole in the middle.");
+    }
+
+    // ---- Relativistic jet --------------------------------------------------
+    if (ImGui::CollapsingHeader("Relativistic jet", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::SliderFloat("Power", &p.jetPower, 0.0f, 4.0f, "%.2f");
+        ImGui::Checkbox("Powered by the spin (Blandford-Znajek)", &p.jetScalesWithSpin);
+        helpMarker("The Blandford-Znajek mechanism taps the *hole's own rotation*:\n"
+                   "magnetic field lines threading the horizon are wound up by frame\n"
+                   "dragging and carry rotational energy away, with power going as\n"
+                   "a*^2.\n\n"
+                   "With this on, a non-rotating hole has no jet at all -- there is\n"
+                   "no rotational energy to extract. Turn it off to draw a jet\n"
+                   "regardless of spin, which is convenient but not physical.");
+        if (p.jetScalesWithSpin && !p.isRotating()) {
+            ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.2f, 1.0f),
+                               "No jet: spin is zero. Raise Spin a*.");
+        }
+        ImGui::SliderFloat("Bulk Lorentz factor", &p.jetLorentz, 1.0f, 15.0f, "%.1f");
+        helpMarker("How fast the outflow streams. This is what makes one jet bright\n"
+                   "and the counter-jet nearly invisible: observed intensity is\n"
+                   "boosted by delta^(2+alpha), so a modest difference in viewing\n"
+                   "angle becomes a large difference in brightness. It is the same\n"
+                   "asymmetry seen in M87.");
+        ImGui::SliderFloat("Length", &p.jetLength, 5.0f, 250.0f, "%.0f");
+        ImGui::SliderFloat("Base radius", &p.jetBaseRadius, 0.05f, 3.0f, "%.2f");
+        ImGui::SliderFloat("Collimation", &p.jetCollimation, 0.0f, 1.2f, "%.2f");
+        helpMarker("Width grows as height^collimation. Real jets are collimated\n"
+                   "parabolically -- M87's is measured at roughly r ~ z^0.6 -- rather\n"
+                   "than opening as a straight cone, which 1.0 would give.");
+        ImGui::SliderFloat("Colour temperature", &p.jetTemperature, 2000.0f, 30000.0f, "%.0f K");
+        helpMarker("Colour only. Synchrotron emission is not thermal, so there is no\n"
+                   "real temperature here -- this just picks where on the Planck\n"
+                   "locus the outflow is tinted.");
+        ImGui::SliderFloat("Knots / turbulence", &p.jetTurbulence, 0.0f, 1.0f, "%.2f");
     }
 
     // ---- Relativistic optics ---------------------------------------------
