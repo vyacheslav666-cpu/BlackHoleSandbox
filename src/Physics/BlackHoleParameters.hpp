@@ -99,7 +99,7 @@ struct BlackHoleParameters {
     // Kerr geodesic solver.  Held just inside 1 because several Kerr formulae
     // are singular exactly at the extremal value; 0.998 is also the physical
     // "Thorne limit" that accretion is thought not to exceed.
-    float spin = 0.7f;
+    float spin = 0.85f;
 
     // ---- Ray integrator --------------------------------------------------
     float rayStep = 0.040f;   // Base RK4 angular increment dphi, in radians.
@@ -112,11 +112,11 @@ struct BlackHoleParameters {
     float diskOuterRadius = 13.0f;
     float diskHalfThickness = 0.075f; // Scale height H at the inner edge.
     float diskFlare = 0.28f;         // H(r) grows as (r/r_in)^diskFlare.
-    float diskBrightness = 16.0f;
-    float diskTemperature = 5200.0f; // Peak *emitted* colour temperature, K.
+    float diskBrightness = 8.5f;
+    float diskTemperature = 4900.0f; // Peak *emitted* colour temperature, K.
     float diskDensity = 1.0f;
-    float diskOpacity = 4.0f;        // Extinction per unit length.
-    float diskTurbulence = 0.75f;
+    float diskOpacity = 2.4f;        // Extinction per unit length.
+    float diskTurbulence = 0.85f;
     float diskRotationDirection = 1.0f;
     float artisticOrbitSpeed = 0.65f;
 
@@ -124,11 +124,11 @@ struct BlackHoleParameters {
     // A pair of collimated outflows along the spin axis.  Blandford-Znajek
     // extracts rotational energy from the hole itself, with power going as
     // a*^2, so by default the jet fades away entirely at zero spin.
-    float jetPower = 1.0f;
+    float jetPower = 0.26f;
     bool jetScalesWithSpin = true;   // Blandford-Znajek a*^2 scaling.
-    float jetLength = 90.0f;         // How far the outflow is drawn.
-    float jetBaseRadius = 0.32f;     // Width where it leaves the hole.
-    float jetCollimation = 0.55f;    // Radius grows as height^collimation.
+    float jetLength = 46.0f;         // How far the outflow is drawn.
+    float jetBaseRadius = 0.13f;     // Width where it leaves the hole.
+    float jetCollimation = 0.80f;    // Radius grows as height^collimation.
     float jetLorentz = 3.0f;         // Bulk Lorentz factor of the flow.
     float jetTemperature = 16000.0f; // Colour only; synchrotron is not thermal.
     float jetTurbulence = 0.7f;
@@ -141,7 +141,7 @@ struct BlackHoleParameters {
     // Radial drift speed of the accreting gas, as a fraction of the local
     // orbital speed.  Real thin disks accrete very slowly; this is what makes
     // the turbulence spiral inwards rather than circle forever.
-    float accretionRate = 0.06f;
+    float accretionRate = 0.10f;
 
     // ---- Relativistic optics (1 = full physical strength) ----------------
     float dopplerStrength = 1.0f;
@@ -149,7 +149,7 @@ struct BlackHoleParameters {
     float beamingStrength = 1.0f;
 
     // ---- Environment -----------------------------------------------------
-    float starDensity = 0.45f;
+    float starDensity = 0.55f;
     float nebulaStrength = 0.8f;
 
     // ---- Sampling / anti-aliasing ---------------------------------------
@@ -159,10 +159,10 @@ struct BlackHoleParameters {
     bool freezeAnimationWhileRefining = true;
 
     // ---- Display ---------------------------------------------------------
-    float exposure = 0.85f;
-    float bloomThreshold = 1.2f;
+    float exposure = 0.62f;
+    float bloomThreshold = 1.15f;
     float bloomKnee = 0.7f;
-    float bloomStrength = 0.42f;
+    float bloomStrength = 0.44f;
     float bloomSampleScale = 1.25f;
     float bloomLevelBlend = 0.62f; // Mix weight per pyramid level; see the shader.
     int bloomLevels = 6;
