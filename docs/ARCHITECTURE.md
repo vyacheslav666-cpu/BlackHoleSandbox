@@ -28,6 +28,7 @@ main.cpp
 | [`src/Renderer/ShaderProgram.*`](../src/Renderer/ShaderProgram.hpp) | Move-only RAII GLSL program with actionable compile/link errors. |
 | [`src/Renderer/RenderTarget.*`](../src/Renderer/RenderTarget.hpp) | One colour attachment plus its framebuffer, in RGBA16F, RGBA32F or RGBA8. |
 | [`src/Renderer/ImageWriter.*`](../src/Renderer/ImageWriter.hpp) | Dependency-free PNG writer (stored-deflate) used by screenshots and `--shot`. |
+| [`src/Renderer/GpuTimer.*`](../src/Renderer/GpuTimer.hpp) | `GL_TIME_ELAPSED` query ring that measures what the ray-tracing pass actually costs on the GPU. |
 | [`src/UI/ControlPanel.*`](../src/UI/ControlPanel.hpp) | The whole ImGui panel. Reads and writes `BlackHoleParameters`; touches no GL. |
 
 Shaders in [`shaders/`](../shaders), all sharing one vertex stage:
@@ -154,6 +155,69 @@ reviewable without a human watching.
 
 [`tools/render_sheet.ps1`](../tools/render_sheet.ps1) drives it over a fixed set
 of viewpoints and every debug mode.
+
+---
+
+## Measuring the renderer
+
+Frame rate cannot answer "did that change make the tracing faster?". The frame
+also contains vsync, the accumulation pass, the bloom pyramid, tone mapping and
+the ImGui panel, and none of those respond to a ray-marching setting. Worse, a
+CPU stopwatch around the draw call measures *submission*: the driver queues the
+work and returns long before the GPU has run it.
+
+So [`GpuTimer`](../src/Renderer/GpuTimer.hpp) brackets the `black_hole` pass in a
+`GL_TIME_ELAPSED` query. Reading such a query back in the frame that issued it
+would block until the GPU caught up — serialising the pipeline and inflating the
+very number being measured — so a ring of eight query objects is cycled instead,
+and each result is collected a few frames later once the driver reports it
+ready. The timer only observes; it issues no draw and changes no pixel.
+
+The collected window reports a **median** and a **p95** rather than a mean. The
+first frame of a run pays for pipeline setup, and any frame can be interrupted
+by the compositor; a mean folds those in, while the median ignores them and the
+p95 says how bad the bad frames actually are. Both are nearest-rank, so each
+figure is a timing that genuinely occurred.
+
+* **Interactive** — shown in the control panel under the FPS line, over a
+  rolling window of recent traced frames. The window restarts on a resize or a
+  shader reload, since older timings then describe code or a resolution that is
+  no longer in play.
+* **`--shot`** — one machine-readable line on stdout after the image is written,
+  covering the whole run:
+
+  ```
+  BHS_TIMING pass=black_hole frames=96 median_ms=8.593 p95_ms=10.451 min_ms=7.889 max_ms=10.493 total_ms=848.603 width=1280 height=720 samples=96
+  ```
+
+  Every duration is milliseconds in the C locale, so the decimal separator never
+  depends on the machine the run happened on.
+
+### The benchmark
+
+[`scripts/bench.ps1`](../scripts/bench.ps1) runs five fixed scenes through
+`--shot` and tabulates those timings. The scenes are chosen so the ray marcher
+diverges differently in each: `wide` lets most rays escape to the background,
+`closeup` puts many of them into near-critical orbits at the photon sphere,
+`edge-on` sends long paths lengthwise through the disk, `kerr` takes the general
+five-ODE solver instead of the planar reduction, and `ultra` raises the step
+budget and traces two rays per pixel per frame. An optimisation that helps one
+of those can easily hurt another, and a single representative scene would hide
+it.
+
+It doubles as an image-regression check. Every scene renders to `bench/current/`
+and is compared against the committed baseline in `bench/reference/`, reporting
+RMSE and the largest single-channel deviation, and exiting non-zero when RMSE
+crosses `-Threshold` (0.002 by default, about half an 8-bit step spread over the
+whole image). So a change that was meant to be a pure speedup can be shown to be
+one.
+
+That check rests on the renderer being reproducible: with `--time 0` and a fixed
+`--samples`, the disk pattern is a function of the animation clock alone and the
+sub-pixel jitter is a function of the sample index alone, so two runs produce
+identical bytes. `-Determinism` renders every scene twice and compares hashes,
+which is worth doing before trusting any RMSE — if it ever fails, the numbers
+are measuring run-to-run noise rather than the change under test.
 
 ---
 

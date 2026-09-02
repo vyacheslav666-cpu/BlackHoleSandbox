@@ -9,6 +9,7 @@
 #include "Application/AppOptions.hpp"
 #include "Camera/Camera.hpp"
 #include "Physics/BlackHoleParameters.hpp"
+#include "Renderer/GpuTimer.hpp"
 #include "Renderer/RenderTarget.hpp"
 #include "Renderer/ShaderProgram.hpp"
 
@@ -120,6 +121,11 @@ private:
     // is deliberately non-copyable.
     std::vector<std::unique_ptr<renderer::RenderTarget>> bloomChain_;
     renderer::RenderTarget captureTarget_;             // LDR readback surface.
+
+    // GPU cost of the black-hole pass alone.  That pass is where essentially
+    // all the frame time goes, and it is the only one whose cost changes with
+    // the scene, so it is the one worth measuring on its own.
+    renderer::GpuTimer blackHoleTimer_;
 
     unsigned int fullscreenVao_ = 0;
 

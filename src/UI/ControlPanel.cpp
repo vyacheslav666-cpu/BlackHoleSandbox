@@ -97,6 +97,18 @@ ControlPanelActions ControlPanel::draw(bool& visible, physics::BlackHoleParamete
 
     // ---- Status -----------------------------------------------------------
     ImGui::Text("%.1f FPS  |  %.2f ms", stats.fps, stats.frameMilliseconds);
+    if (stats.blackHoleFrames > 0) {
+        ImGui::Text("black_hole pass: %.2f ms", stats.blackHoleLastMs);
+        ImGui::TextDisabled("  median %.2f  |  p95 %.2f  (%d frames)", stats.blackHoleMedianMs,
+                            stats.blackHoleP95Ms, stats.blackHoleFrames);
+        helpMarker("GPU time spent tracing rays, measured with a GL_TIME_ELAPSED query.\n"
+                   "The FPS line above is the whole frame: vsync, accumulation, bloom,\n"
+                   "tone mapping and this panel are all in it, and none of them respond\n"
+                   "to the ray-marching settings. This line does.\n\n"
+                   "Median and p95 are taken over a rolling window of recent traced\n"
+                   "frames. The window restarts on a resize or a shader reload, since\n"
+                   "older timings then describe something that is no longer running.");
+    }
     ImGui::TextDisabled("Internal HDR buffer: %d x %d", stats.renderWidth, stats.renderHeight);
     if (p.progressiveRefinement) {
         const float progress =

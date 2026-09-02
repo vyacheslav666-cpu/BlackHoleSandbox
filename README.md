@@ -61,6 +61,23 @@ Or render every viewpoint and debug view at once:
 ./tools/render_sheet.ps1
 ```
 
+## Benchmarking
+
+Each `--shot` prints how long the ray-tracing pass took on the GPU, measured
+with a `GL_TIME_ELAPSED` query rather than inferred from the frame rate. The
+interactive panel shows the same figures live.
+
+```powershell
+./scripts/bench.ps1
+```
+
+That times five scenes chosen to stress the ray marcher in different ways, then
+compares each rendered image against the committed baseline in `bench/reference/`
+and exits non-zero if any of them has drifted. `-UpdateReference` adopts the
+current images as the new baseline; `-Determinism` proves each scene still
+renders to identical bytes twice in a row. Details in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#measuring-the-renderer).
+
 ## What is implemented
 
 | | |

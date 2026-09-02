@@ -15,6 +15,13 @@ struct RuntimeStats {
     int accumulatedSamples = 0;
     float animationTime = 0.0f;
     bool animationPaused = false;
+    // GPU cost of the black-hole pass, measured with a timer query rather than
+    // inferred from the frame rate: vsync, the UI and the rest of the pipeline
+    // all sit inside the frame time, and none of them belong in this number.
+    int blackHoleFrames = 0;
+    double blackHoleLastMs = 0.0;
+    double blackHoleMedianMs = 0.0;
+    double blackHoleP95Ms = 0.0;
     std::string glRenderer;
     std::string glVersion;
 };

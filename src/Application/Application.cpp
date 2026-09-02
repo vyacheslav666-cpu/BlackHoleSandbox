@@ -7,6 +7,7 @@
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
@@ -62,6 +63,27 @@ private:
     }
     std::uint64_t hash_ = 14695981039346656037ull;
 };
+
+// One line, one record, key=value throughout, prefixed so a benchmark script
+// can pick it out of the rest of stdout with a plain string match.  Every
+// duration is in milliseconds and written in the C locale, so the decimal
+// separator never depends on the machine the run happened on.
+std::string timingReportLine(const renderer::GpuTimer& timer, int width, int height,
+                             int requestedSamples) {
+    std::ostringstream line;
+    line << std::fixed << std::setprecision(3);
+    line << "BHS_TIMING pass=black_hole"
+         << " frames=" << timer.sampleCount()
+         << " median_ms=" << timer.medianMilliseconds()
+         << " p95_ms=" << timer.percentileMilliseconds(0.95)
+         << " min_ms=" << timer.minMilliseconds()
+         << " max_ms=" << timer.maxMilliseconds()
+         << " total_ms=" << timer.totalMilliseconds()
+         << " width=" << width
+         << " height=" << height
+         << " samples=" << requestedSamples;
+    return line.str();
+}
 
 std::string timestampedScreenshotName(int counter) {
     const auto now = std::chrono::system_clock::now().time_since_epoch();
@@ -244,6 +266,7 @@ void Application::shutdown() {
     accumulationTargets_[1].release();
     bloomChain_.clear();
     captureTarget_.release();
+    blackHoleTimer_.release();
     blackHoleProgram_.reset();
     accumulateProgram_.reset();
     bloomDownsampleProgram_.reset();
@@ -293,6 +316,9 @@ void Application::loadShaders() {
     bloomUpsampleProgram_ = std::move(upsample);
     postprocessProgram_ = std::move(postprocess);
     resetAccumulation();
+    // Timings from the previous shaders describe code that is no longer
+    // running, so they must not be averaged in with the new ones.
+    blackHoleTimer_.resetStatistics();
     std::cout << "Loaded GLSL shaders from " << shaderDirectory_.string() << '\n';
 }
 
@@ -337,6 +363,9 @@ void Application::createOrResizeRenderTargets() {
 
     resizePending_ = false;
     resetAccumulation();
+    // Cost scales with pixel count, so timings taken at the old resolution say
+    // nothing about the new one.
+    blackHoleTimer_.resetStatistics();
 }
 
 // =============================================================================
@@ -391,6 +420,9 @@ void Application::resetAccumulation() { accumulatedSamples_ = 0; }
 // =============================================================================
 
 void Application::renderScene(float animationTime) {
+    // Measures the whole pass, state setup included.  The timer only observes;
+    // it issues no draw of its own and changes nothing about the image.
+    blackHoleTimer_.begin();
     sceneTarget_.bindForFullWrite();
     glDisable(GL_BLEND);
 
@@ -442,6 +474,7 @@ void Application::renderScene(float animationTime) {
 
     glBindVertexArray(fullscreenVao_);
     glDrawArrays(GL_TRIANGLES, 0, 3);
+    blackHoleTimer_.end();
 }
 
 unsigned int Application::accumulateScene() {
@@ -625,6 +658,9 @@ int Application::run() {
         renderBloom(displayTexture);
         renderPostprocess(displayTexture, 0, framebufferWidth_, framebufferHeight_);
 
+        // A converged frame re-traces nothing, so nothing would otherwise pick
+        // up the timings still in flight from the last frame that did.
+        blackHoleTimer_.poll();
         drawControls();
         ImGui::Render();
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -649,6 +685,9 @@ int Application::runCapture() {
         renderScene(options_.animationTime);
         displayTexture = accumulateScene();
     }
+    // The last few queries are still in flight; without this they would be
+    // missing from the statistics reported below.
+    blackHoleTimer_.flush();
 
     renderBloom(displayTexture);
     renderPostprocess(displayTexture, captureTarget_.framebuffer(), framebufferWidth_,
@@ -716,6 +755,8 @@ int Application::runCapture() {
     }
     std::cout << "Wrote " << options_.capturePath.string() << " (" << framebufferWidth_ << 'x'
               << framebufferHeight_ << ", " << samples << " accumulated samples)\n";
+    std::cout << timingReportLine(blackHoleTimer_, framebufferWidth_, framebufferHeight_, samples)
+              << std::endl;
     return 0;
 }
 
@@ -884,6 +925,10 @@ void Application::drawControls() {
     stats.accumulatedSamples = accumulatedSamples_;
     stats.animationTime = animationTime_;
     stats.animationPaused = animationPaused_;
+    stats.blackHoleFrames = static_cast<int>(blackHoleTimer_.sampleCount());
+    stats.blackHoleLastMs = blackHoleTimer_.lastMilliseconds();
+    stats.blackHoleMedianMs = blackHoleTimer_.medianMilliseconds();
+    stats.blackHoleP95Ms = blackHoleTimer_.percentileMilliseconds(0.95);
     stats.glRenderer = glRenderer_;
     stats.glVersion = glVersion_;
 

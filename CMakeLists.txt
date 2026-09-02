@@ -119,6 +119,7 @@ set(BHS_SOURCES
     src/Application/AppOptions.cpp
     src/Application/Application.cpp
     src/Camera/Camera.cpp
+    src/Renderer/GpuTimer.cpp
     src/Renderer/ImageWriter.cpp
     src/Renderer/RenderTarget.cpp
     src/Renderer/ShaderProgram.cpp

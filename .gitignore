@@ -18,3 +18,9 @@ sheet/
 
 # Runtime state
 imgui.ini
+
+# Benchmark output.  A bench run is scratch and gets overwritten constantly;
+# the reference images are the committed baseline it is measured against, so
+# they are exempted from the blanket *.png rule above.
+bench/current/
+!bench/reference/*.png
