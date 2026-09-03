@@ -255,6 +255,11 @@ void ShaderProgram::setInt(const char* name, int value) const {
     if (uniformLocation >= 0) glUniform1i(uniformLocation, value);
 }
 
+void ShaderProgram::setUint(const char* name, unsigned int value) const {
+    const GLint uniformLocation = location(name);
+    if (uniformLocation >= 0) glUniform1ui(uniformLocation, value);
+}
+
 void ShaderProgram::setFloat(const char* name, float value) const {
     const GLint uniformLocation = location(name);
     if (uniformLocation >= 0) glUniform1f(uniformLocation, value);

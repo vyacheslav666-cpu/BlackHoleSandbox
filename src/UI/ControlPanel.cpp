@@ -236,18 +236,41 @@ ControlPanelActions ControlPanel::draw(bool& visible, physics::BlackHoleParamete
                    "background stars, since a ray that reaches the disk or the hole\n"
                    "never qualifies for it. Zero switches it off entirely.");
         ImGui::BeginDisabled(!stats.computeTracerAvailable);
-        ImGui::Checkbox("Trace in a compute shader", &p.useComputeTracer);
+        const std::array<const char*, 3> kTracerLabels = {"Fragment", "Compute", "Wavefront"};
+        int backend = static_cast<int>(p.tracerBackend);
+        if (ImGui::Combo("Tracer", &backend, kTracerLabels.data(),
+                         static_cast<int>(kTracerLabels.size()))) {
+            p.tracerBackend = static_cast<physics::TracerBackend>(backend);
+        }
         ImGui::EndDisabled();
         helpMarker(stats.computeTracerAvailable
-                       ? "Runs the identical tracer as a compute dispatch writing through\n"
-                         "an image, instead of a fragment shader writing a colour\n"
-                         "attachment. Both are compiled from one shared body, so this is\n"
-                         "an A/B switch and not a second implementation.\n\n"
-                         "The two agree to within float rounding rather than exactly --\n"
-                         "the arithmetic is identical but its order is not -- so flipping\n"
-                         "this restarts the refinement."
+                       ? "Which of three schedulings of the identical tracer runs the\n"
+                         "pass. All are compiled from one shared body, so this is an A/B\n"
+                         "switch and not three renderers.\n\n"
+                         "Compute dispatches a grid of workgroups writing an image\n"
+                         "instead of a fragment shader writing a colour attachment.\n"
+                         "Wavefront parks each ray in a buffer, advances it a chunk at a\n"
+                         "time and compacts the survivors in between, so a warp is not\n"
+                         "held hostage by its slowest ray. It implements the Kerr solver\n"
+                         "only and falls back to Compute at zero spin.\n\n"
+                         "They agree to within float rounding rather than exactly -- the\n"
+                         "arithmetic is identical but its order is not -- so switching\n"
+                         "restarts the refinement."
                        : "Unavailable: this driver does not expose screen-space\n"
                          "derivatives in a compute stage, which the starfield needs.");
+        if (stats.computeTracerAvailable &&
+            p.tracerBackend == physics::TracerBackend::Wavefront) {
+            ImGui::SliderInt("Chunk steps", &p.wavefrontChunkSteps, 4, 256);
+            helpMarker("Steps a wavefront chunk takes before parking every ray and\n"
+                       "compacting the survivors. Smaller chunks compact more often,\n"
+                       "which is the point, but each one pays a full round trip of the\n"
+                       "ray state through memory -- and that traffic is exactly what\n"
+                       "the scheme is trading away.");
+            ImGui::SliderInt("Finish threshold", &p.wavefrontFinishThreshold, 0, 65536);
+            helpMarker("Once this few rays are still alive, chunking has nothing left\n"
+                       "to save and the remainder runs in one pass with the whole\n"
+                       "budget.");
+        }
         if (stats.computeTracerAvailable) {
             // A workgroup whose height is odd cannot form 2x2 derivative quads,
             // which changes the starfield filter, so the choices are limited to

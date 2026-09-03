@@ -31,6 +31,7 @@ public:
     void reset();
 
     void setInt(const char* name, int value) const;
+    void setUint(const char* name, unsigned int value) const;
     void setFloat(const char* name, float value) const;
     void setVec2(const char* name, const glm::vec2& value) const;
     void setVec3(const char* name, const glm::vec3& value) const;

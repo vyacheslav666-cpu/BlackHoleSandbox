@@ -1,0 +1,42 @@
+#version 460 core
+
+// Wavefront pass 3: hand the survivor count on to the next chunk.
+//
+// One invocation. It moves the count the last chunk built into the slot the next
+// one reads, clears the append target, and sizes the next dispatch -- so the CPU
+// never has to know how many rays are left in order to launch the work, and no
+// chunk boundary needs a readback to proceed.
+//
+// It also drops the count into a small ring that the CPU reads a couple of
+// iterations later. That is what the loop condition uses: asking for the live
+// count as soon as it is written stalls the pipeline on every single chunk, and
+// the loop only needs to know roughly when the population has collapsed.
+//
+// This is the one wavefront stage that does not include the tracer. It has no
+// use for it, and including it would drag in the starfield's fwidth() and the
+// horizon guide's dFdx() -- which a compute stage may only compile with a
+// derivative group declared, and a single-invocation workgroup cannot declare
+// one.
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 4) restrict buffer ControlBuffer { uint uControl[]; };
+
+const uint kControlLiveIn   = 0u;
+const uint kControlLiveOut  = 1u;
+const uint kControlIndirect = 4u;
+const uint kControlHistory  = 8u;
+const uint kWavefrontLocalSize = 64u;
+
+uniform uint uIteration;
+
+void main()
+{
+    uint live = uControl[kControlLiveOut];
+    uControl[kControlLiveIn] = live;
+    uControl[kControlLiveOut] = 0u;
+    uControl[kControlIndirect + 0u] = (live + kWavefrontLocalSize - 1u) / kWavefrontLocalSize;
+    uControl[kControlIndirect + 1u] = 1u;
+    uControl[kControlIndirect + 2u] = 1u;
+    uControl[kControlHistory + (uIteration & 3u)] = live;
+}

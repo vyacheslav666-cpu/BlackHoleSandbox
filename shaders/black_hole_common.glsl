@@ -1756,29 +1756,53 @@ TraceResult traceSchwarzschild(vec3 rayOrigin, vec3 initialDirection, bool ignor
 // step is taken in the affine parameter, because with rotation there is no
 // single orbital plane whose angle could serve as one.
 
-TraceResult traceKerr(vec3 rayOrigin, vec3 initialDirection, bool ignoreDisk)
+// =============================================================================
+// The Kerr tracer, in three parts
+// =============================================================================
+//
+// The integration is split so that it can be *paused*.  traceKerr below still
+// runs it start to finish in one call and is what the fragment and compute
+// paths use; the wavefront path calls kerrAdvance repeatedly with a small step
+// budget, parking the state in a buffer in between, so that rays which finish
+// early stop occupying lanes in a warp alongside rays that need a thousand
+// steps.
+//
+// Nothing about the trajectory changes. The only thing the split has to get
+// right is that everything carried between steps lives in KerrRay or
+// TraceResult, and it does: position and momentum are the integrator's whole
+// state, and previousWorld is by construction the world position of the step
+// that just finished, so a chunk can rebuild it from position alone.
+
+struct KerrRay
 {
+    vec3 position;   // Kerr-Schild, spin frame
+    vec3 momentum;   // spin frame, energy normalised to 1
+};
+
+// Initial conditions. `done` comes back true when the ray is over before it
+// starts, which happens only for a camera inside the horizon.
+KerrRay kerrBegin(vec3 rayOrigin, vec3 initialDirection, out TraceResult trace, out bool done)
+{
+    KerrRay ray;
+    ray.position = vec3(0.0);
+    ray.momentum = vec3(0.0);
+    done = false;
     float rs = configuredOr(uSchwarzschildRadius, 1.0);
     float mass = 0.5 * rs;
     float spinStar = clamp(uSpin, -0.998, 0.998);
     float a = spinStar * mass;
 
     float cameraRadius = length(rayOrigin);
-    TraceResult trace = makeTrace(initialDirection, cameraRadius);
+    trace = makeTrace(initialDirection, cameraRadius);
 
     float horizon = kerrHorizon(mass, spinStar);
     if (cameraRadius <= horizon * 1.02)
     {
         trace.state = kTraceCaptured;
         trace.minRadius = cameraRadius;
-        return trace;
+        done = true;
+        return ray;
     }
-
-    float innerRadius = configuredOr(uDiskInnerRadius, 3.0 * rs);
-    float outerRadius = max(configuredOr(uDiskOuterRadius, 18.0 * rs), innerRadius + 0.05 * rs);
-    float baseHeight  = configuredOr(uDiskHalfThickness, 0.10 * rs);
-    float slabHalfHeight = 3.0 * diskScaleHeight(outerRadius, innerRadius, baseHeight);
-    float escapeRadius = max(configuredOr(uEscapeRadius, 80.0 * rs), cameraRadius * 1.25);
 
     // ---- Initial conditions ------------------------------------------------
     // Work in the spin frame, where the rotation axis is +Z.
@@ -1822,6 +1846,51 @@ TraceResult traceKerr(vec3 rayOrigin, vec3 initialDirection, bool ignoreDisk)
     momentum *= invEnergy;
     energy = 1.0;
 
+    ray.position = position;
+    ray.momentum = momentum;
+    return ray;
+}
+
+// The extrapolation used when a ray runs out of its step budget: rays very close
+// to the critical impact parameter would otherwise flicker between outcomes.
+void kerrFinish(inout KerrRay ray, inout TraceResult trace)
+{
+    float rs = configuredOr(uSchwarzschildRadius, 1.0);
+    float mass = 0.5 * rs;
+    float spinStar = clamp(uSpin, -0.998, 0.998);
+    float a = spinStar * mass;
+
+    vec3 position = ray.position;
+    vec3 momentum = ray.momentum;
+    float energy = 1.0;
+    vec3 dPosition = vec3(0.0);
+    vec3 dMomentum = vec3(0.0);
+    // Budget exhausted. As in the Schwarzschild solver, extrapolate from the
+    // current radial motion rather than flickering: still falling inwards means
+    // the ray was almost certainly going to be captured.
+    kerrSchildDerivatives(position, momentum, energy, mass, a, dPosition, dMomentum);
+    float radialRate = dot(normalize(position), dPosition);
+    trace.state = radialRate < 0.0 ? kTraceCaptured : kTraceExhausted;
+    trace.escapeDirection = normalize(spinFrameToWorld(dPosition));
+}
+
+// Advances the ray by at most `budget` steps. Returns true once it is finished:
+// captured, escaped, fully absorbed, or out of its global budget.
+bool kerrAdvance(inout KerrRay ray, inout TraceResult trace, bool ignoreDisk, int budget)
+{
+    float rs = configuredOr(uSchwarzschildRadius, 1.0);
+    float mass = 0.5 * rs;
+    float spinStar = clamp(uSpin, -0.998, 0.998);
+    float a = spinStar * mass;
+
+    float horizon = kerrHorizon(mass, spinStar);
+    float cameraRadius = length(uCameraPosition);
+    float innerRadius = configuredOr(uDiskInnerRadius, 3.0 * rs);
+    float outerRadius = max(configuredOr(uDiskOuterRadius, 18.0 * rs), innerRadius + 0.05 * rs);
+    float baseHeight  = configuredOr(uDiskHalfThickness, 0.10 * rs);
+    float slabHalfHeight = 3.0 * diskScaleHeight(outerRadius, innerRadius, baseHeight);
+    float escapeRadius = max(configuredOr(uEscapeRadius, 80.0 * rs), cameraRadius * 1.25);
+
     // Kerr needs a bigger budget than Schwarzschild: the affine step is much
     // finer near the horizon, so the same quality preset buys fewer steps.
     int maxSteps = clamp(2 * (uMaxRaySteps > 0 ? uMaxRaySteps : 512), 1, kCompiledMaxRaySteps);
@@ -1829,13 +1898,21 @@ TraceResult traceKerr(vec3 rayOrigin, vec3 initialDirection, bool ignoreDisk)
     // scales the adaptive affine step, normalised so the default lands at 1.
     float qualityScale = clamp(configuredOr(uRayStep, 0.04) / 0.04, 0.05, 3.0);
 
-    vec3 previousWorld = rayOrigin;
+
+    vec3 position = ray.position;
+    vec3 momentum = ray.momentum;
+    float energy = 1.0;
+    // The previous point is where the last completed step left the ray, which is
+    // exactly where it is now -- so a chunk boundary needs nothing carried over.
+    vec3 previousWorld = spinFrameToWorld(position);
     vec3 dPosition = vec3(0.0);
     vec3 dMomentum = vec3(0.0);
 
-    for (int stepIndex = 0; stepIndex < kCompiledMaxRaySteps; ++stepIndex)
+    for (int chunkStep = 0; chunkStep < kCompiledMaxRaySteps; ++chunkStep)
     {
-        if (stepIndex >= maxSteps)
+        // Two bounds now, not one: the chunk this call was given, and the
+        // global budget the ray has been spending across every chunk so far.
+        if (chunkStep >= budget || trace.steps >= maxSteps)
         {
             break;
         }
@@ -1866,7 +1943,7 @@ TraceResult traceKerr(vec3 rayOrigin, vec3 initialDirection, bool ignoreDisk)
         h = clamp(h, 1e-4 * rs, 6.0 * max(r, rs));
 
         kerrSchildStepRk4(position, momentum, energy, h, mass, a);
-        trace.steps = stepIndex + 1;
+        trace.steps = trace.steps + 1;
 
         vec3 currentWorld = spinFrameToWorld(position);
         float currentRadius = kerrSchildRadius(position, a);
@@ -1881,7 +1958,9 @@ TraceResult traceKerr(vec3 rayOrigin, vec3 initialDirection, bool ignoreDisk)
             {
                 trace.state = kTraceEscaped;
                 trace.escapeDirection = normalize(currentWorld - previousWorld);
-                return trace;
+                ray.position = position;
+            ray.momentum = momentum;
+            return true;
             }
         }
 
@@ -1889,7 +1968,9 @@ TraceResult traceKerr(vec3 rayOrigin, vec3 initialDirection, bool ignoreDisk)
         {
             trace.state = kTraceCaptured;
             trace.minRadius = min(trace.minRadius, horizon);
-            return trace;
+            ray.position = position;
+            ray.momentum = momentum;
+            return true;
         }
 
         if (length(currentWorld) >= escapeRadius)
@@ -1899,19 +1980,34 @@ TraceResult traceKerr(vec3 rayOrigin, vec3 initialDirection, bool ignoreDisk)
             // dx/dlambda is already a Cartesian velocity -- no Jacobian needed,
             // which is another small dividend of using Kerr-Schild.
             trace.escapeDirection = normalize(spinFrameToWorld(dPosition));
-            return trace;
+            ray.position = position;
+            ray.momentum = momentum;
+            return true;
         }
 
         previousWorld = currentWorld;
     }
 
-    // Budget exhausted. As in the Schwarzschild solver, extrapolate from the
-    // current radial motion rather than flickering: still falling inwards means
-    // the ray was almost certainly going to be captured.
-    kerrSchildDerivatives(position, momentum, energy, mass, a, dPosition, dMomentum);
-    float radialRate = dot(normalize(position), dPosition);
-    trace.state = radialRate < 0.0 ? kTraceCaptured : kTraceExhausted;
-    trace.escapeDirection = normalize(spinFrameToWorld(dPosition));
+
+    ray.position = position;
+    ray.momentum = momentum;
+    if (trace.steps >= maxSteps)
+    {
+        kerrFinish(ray, trace);
+        return true;
+    }
+    return false;
+}
+
+TraceResult traceKerr(vec3 rayOrigin, vec3 initialDirection, bool ignoreDisk)
+{
+    TraceResult trace;
+    bool done;
+    KerrRay ray = kerrBegin(rayOrigin, initialDirection, trace, done);
+    if (!done)
+    {
+        kerrAdvance(ray, trace, ignoreDisk, kCompiledMaxRaySteps);
+    }
     return trace;
 }
 
@@ -1982,22 +2078,18 @@ float halton3(int index)
     return result;
 }
 
-vec3 shadeRay(vec2 uv, out TraceResult traceOut)
+// Everything downstream of the trace: the background lookup, every debug view,
+// the composite and the guides.
+//
+// It is separate because the wavefront path cannot run it where it traces. Both
+// the starfield's filter width and the horizon guide's edge are screen-space
+// derivatives, and in a compacted ray list an invocation's neighbours are
+// unrelated pixels, so derivatives there would be meaningless. This runs in an
+// image-space pass instead, where a workgroup is a tile of adjacent pixels and
+// the derivatives mean what they always did.
+vec3 shadeTraceResult(TraceResult trace)
 {
-    vec3 rayOrigin = uCameraPosition;
-    vec3 rayDirection = reconstructWorldRay(uv);
-
     int debugMode = uDebugMode;
-    bool ignoreDisk = (debugMode == 1 || debugMode == 8);
-
-    // Without spin the planar Schwarzschild solver is both exact and much
-    // cheaper, so it is kept rather than folded into the general case. The two
-    // agree in the limit; the branch is purely about performance.
-    TraceResult trace = abs(uSpin) > 1e-4
-                            ? traceKerr(rayOrigin, rayDirection, ignoreDisk)
-                            : traceSchwarzschild(rayOrigin, rayDirection, ignoreDisk);
-    traceOut = trace;
-
     // The background is only visible through whatever the disk did not absorb.
     vec3 environment = trace.state == kTraceCaptured ? vec3(0.0)
                                                      : sampleEnvironment(trace.escapeDirection);
@@ -2079,26 +2171,51 @@ vec3 shadeRay(vec2 uv, out TraceResult traceOut)
     return colour;
 }
 
+
+vec3 shadeRay(vec2 uv, out TraceResult traceOut)
+{
+    vec3 rayOrigin = uCameraPosition;
+    vec3 rayDirection = reconstructWorldRay(uv);
+
+    int debugMode = uDebugMode;
+    bool ignoreDisk = (debugMode == 1 || debugMode == 8);
+
+    // Without spin the planar Schwarzschild solver is both exact and much
+    // cheaper, so it is kept rather than folded into the general case. The two
+    // agree in the limit; the branch is purely about performance.
+    TraceResult trace = abs(uSpin) > 1e-4
+                            ? traceKerr(rayOrigin, rayDirection, ignoreDisk)
+                            : traceSchwarzschild(rayOrigin, rayDirection, ignoreDisk);
+    traceOut = trace;
+    return shadeTraceResult(trace);
+}
+
 // One pixel of the HDR pass.  `pixelUv` is the centre of the pixel in 0..1;
 // the fragment entry point takes it from the interpolated vUv and the compute
 // one derives it from gl_GlobalInvocationID.  Everything below this line is
 // identical for both.
+// Sub-pixel position of one sample. Each frame and each in-frame sample gets a
+// distinct Halton index, so progressive refinement keeps filling in new
+// positions. Shared with the wavefront generate pass, which has to produce
+// exactly the same rays.
+vec2 sampleUv(vec2 pixelUv, int sampleInFrame, int spp)
+{
+    vec2 texelSize = 1.0 / max(uResolution, vec2(1.0));
+    int index = uSampleIndex * spp + sampleInFrame;
+    vec2 offset = vec2(radicalInverse2(uint(index)), halton3(index)) - 0.5;
+    return pixelUv + (uJitter + offset) * texelSize;
+}
+
 vec4 renderPixel(vec2 pixelUv)
 {
     int spp = clamp(uSamplesPerFrame, 1, 8);
-    vec2 texelSize = 1.0 / max(uResolution, vec2(1.0));
 
     vec3 accumulated = vec3(0.0);
     TraceResult lastTrace;
     for (int s = 0; s < 8; ++s)
     {
         if (s >= spp) break;
-        // Each frame and each in-frame sample gets a distinct Halton index, so
-        // progressive refinement keeps filling in new sub-pixel positions.
-        int index = uSampleIndex * spp + s;
-        vec2 offset = vec2(radicalInverse2(uint(index)), halton3(index)) - 0.5;
-        vec2 uv = pixelUv + (uJitter + offset) * texelSize;
-        accumulated += shadeRay(uv, lastTrace);
+        accumulated += shadeRay(sampleUv(pixelUv, s, spp), lastTrace);
     }
 
     return vec4(max(accumulated / float(spp), vec3(0.0)), 1.0);

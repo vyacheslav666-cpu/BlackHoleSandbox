@@ -1,0 +1,57 @@
+#version 460 core
+
+// Wavefront pass 2: advance every live ray by one chunk, and compact.
+//
+// The compaction is folded into this pass rather than run as a separate one. A
+// separate pass would have to re-read every ray's state just to discover whether
+// it is still alive, and that read is the expensive part of the entire scheme;
+// here the answer is already sitting in a register.
+//
+// The atomic append leaves the list in an arbitrary order, which costs nothing:
+// rays are independent, and the shade pass sums a pixel's samples by index
+// rather than in list order, so no float addition changes order between runs.
+
+// The tracer this includes contains derivative calls -- the starfield's
+// fwidth(), the horizon guide's dFdx() -- and GLSL requires the extension and a
+// derivative group for a compute stage to *compile* them, whether or not they
+// are ever reached. Nothing in this pass reaches them: the background and the
+// guides are shaded in wavefront_shade.comp, where the derivatives are genuine.
+// The group shape below therefore only has to satisfy the compiler.
+#extension GL_NV_compute_shader_derivatives : require
+
+// 64 is a multiple of four, which is what the linear grouping needs; a dense
+// list has no 2D neighbourhood for the quad grouping to use anyway.
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(derivative_group_linearNV) in;
+
+#include "black_hole_common.glsl"
+#include "wavefront_common.glsl"
+
+// Steps this pass is allowed to take. The final pass sets it to the whole
+// remaining budget to finish off the stragglers in one go.
+uniform int uChunkSteps;
+
+void main()
+{
+    uint slot = gl_GlobalInvocationID.x;
+    if (slot >= uControl[kControlLiveIn])
+    {
+        return;
+    }
+
+    uint rayIndex = uListIn[slot];
+    RayState st = uRays[rayIndex];
+
+    KerrRay ray;
+    TraceResult traceState;
+    unpackRay(st, ray, traceState);
+
+    bool ignoreDisk = (uDebugMode == 1 || uDebugMode == 8);
+    bool done = kerrAdvance(ray, traceState, ignoreDisk, max(uChunkSteps, 1));
+
+    uRays[rayIndex] = packRay(ray, traceState, st.meta.x);
+    if (!done)
+    {
+        uListOut[atomicAdd(uControl[kControlLiveOut], 1u)] = rayIndex;
+    }
+}

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -36,6 +37,14 @@ private:
 
     // ---- Render passes, in pipeline order --------------------------------
     void renderScene(float animationTime);
+    void setTracerUniforms(renderer::ShaderProgram& program, float animationTime);
+    void dispatchOverImage(int groupX, int groupY);
+    void renderSceneWavefront(float animationTime);
+    void ensureWavefrontBuffers(std::size_t rayCount);
+    void releaseWavefrontBuffers();
+    // Falls back to Compute where Wavefront cannot run: it implements the Kerr
+    // integrator only, and the compute stage needs the derivatives extension.
+    [[nodiscard]] physics::TracerBackend activeTracerBackend() const;
     // Returns the texture holding the image to display: either the raw scene
     // or the progressively refined average.
     unsigned int accumulateScene();
@@ -118,6 +127,18 @@ private:
     bool computeTracerAvailable_ = false;
     int computeGroupXCompiled_ = 8;
     int computeGroupYCompiled_ = 8;
+
+    // The wavefront scheduler: four small programs and the buffers the ray state
+    // is parked in between chunks.
+    renderer::ShaderProgram wavefrontGenerateProgram_;
+    renderer::ShaderProgram wavefrontTraceProgram_;
+    renderer::ShaderProgram wavefrontPrepareProgram_;
+    renderer::ShaderProgram wavefrontShadeProgram_;
+    unsigned int rayStateBuffer_ = 0;
+    unsigned int rayListBuffers_[2] = {0, 0};
+    unsigned int wavefrontControlBuffer_ = 0;
+    std::size_t wavefrontRayCapacity_ = 0;
+    bool wavefrontFallbackReported_ = false;
     renderer::ShaderProgram accumulateProgram_;
     renderer::ShaderProgram bloomDownsampleProgram_;
     renderer::ShaderProgram bloomUpsampleProgram_;

@@ -279,6 +279,11 @@ void Application::shutdown() {
     blackHoleTimer_.release();
     blackHoleProgram_.reset();
     blackHoleComputeProgram_.reset();
+    wavefrontGenerateProgram_.reset();
+    wavefrontTraceProgram_.reset();
+    wavefrontPrepareProgram_.reset();
+    wavefrontShadeProgram_.reset();
+    releaseWavefrontBuffers();
     accumulateProgram_.reset();
     bloomDownsampleProgram_.reset();
     bloomUpsampleProgram_.reset();
@@ -335,8 +340,29 @@ void Application::loadShaders() {
             renderer::ShaderProgram::fromComputeFile(shaderDirectory_ / "black_hole.comp", defines);
     }
 
+    // The wavefront scheduler.  Compiled unconditionally alongside the others so
+    // that one build can be measured three ways.
+    renderer::ShaderProgram wavefrontGenerate;
+    renderer::ShaderProgram wavefrontTrace;
+    renderer::ShaderProgram wavefrontPrepare;
+    renderer::ShaderProgram wavefrontShade;
+    if (computeTracerAvailable_) {
+        wavefrontGenerate =
+            renderer::ShaderProgram::fromComputeFile(shaderDirectory_ / "wavefront_generate.comp");
+        wavefrontTrace =
+            renderer::ShaderProgram::fromComputeFile(shaderDirectory_ / "wavefront_trace.comp");
+        wavefrontPrepare =
+            renderer::ShaderProgram::fromComputeFile(shaderDirectory_ / "wavefront_prepare.comp");
+        wavefrontShade =
+            renderer::ShaderProgram::fromComputeFile(shaderDirectory_ / "wavefront_shade.comp");
+    }
+
     blackHoleProgram_ = std::move(blackHole);
     blackHoleComputeProgram_ = std::move(blackHoleCompute);
+    wavefrontGenerateProgram_ = std::move(wavefrontGenerate);
+    wavefrontTraceProgram_ = std::move(wavefrontTrace);
+    wavefrontPrepareProgram_ = std::move(wavefrontPrepare);
+    wavefrontShadeProgram_ = std::move(wavefrontShade);
     computeGroupXCompiled_ = groupX;
     computeGroupYCompiled_ = groupY;
     accumulateProgram_ = std::move(accumulate);
@@ -423,7 +449,7 @@ std::uint64_t Application::renderStateFingerprint() const {
     f.add(p.rayStepMax);
     // The two tracers agree to within float rounding rather than exactly, so
     // switching between them has to restart the average.
-    f.add(p.useComputeTracer);
+    f.add(static_cast<int>(p.tracerBackend));
     f.add(p.diskInnerRadius);
     f.add(p.diskOuterRadius);
     f.add(p.diskHalfThickness);
@@ -467,26 +493,196 @@ void Application::resetAccumulation() { accumulatedSamples_ = 0; }
 // Render passes
 // =============================================================================
 
-void Application::renderScene(float animationTime) {
-    // The two tracers are built from one shared body and take the same uniforms,
-    // so everything between here and the dispatch is common to both.
-    const bool useCompute = parameters_.useComputeTracer && computeTracerAvailable_;
-    renderer::ShaderProgram& program =
-        useCompute ? blackHoleComputeProgram_ : blackHoleProgram_;
+// Uploads the frame to whichever tracer is about to run.  All three take the
+// same uniforms, because all three are the same tracer.
+namespace {
 
-    // Measures the whole pass, state setup included.  The timer only observes;
-    // it issues no draw of its own and changes nothing about the image.
-    blackHoleTimer_.begin();
-    if (useCompute) {
-        // The compute pass writes the scene target through an image unit, so it
-        // wants no framebuffer and no blend state at all.
-        glBindImageTexture(0, sceneTarget_.texture(), 0, GL_FALSE, 0, GL_WRITE_ONLY,
-                           GL_RGBA16F);
-    } else {
-        sceneTarget_.bindForFullWrite();
-        glDisable(GL_BLEND);
+// Layout of the wavefront control block, mirroring wavefront_common.glsl.
+constexpr std::size_t kControlWords = 16;
+constexpr GLsizeiptr kControlBytes = kControlWords * sizeof(std::uint32_t);
+constexpr std::size_t kControlHistoryWord = 8;
+constexpr GLintptr kControlIndirectByteOffset = 4 * sizeof(std::uint32_t);
+
+} // namespace
+
+// =============================================================================
+// The wavefront scheduler
+// =============================================================================
+//
+// Same tracer, scheduled differently. Instead of running each ray to completion
+// in the invocation that owns its pixel, every ray is advanced by a fixed chunk
+// of steps, parked in a buffer, and the survivors compacted into a dense list
+// before the next chunk. A warp then never waits on a ray that finished long
+// ago -- which is the whole point, because in this scene neighbouring rays
+// differ by an order of magnitude in how many steps they need.
+//
+// What it costs is a round trip of the ray state through memory on every chunk,
+// for every ray still alive. That is the trade being measured.
+
+physics::TracerBackend Application::activeTracerBackend() const {
+    physics::TracerBackend backend = parameters_.tracerBackend;
+    if (backend != physics::TracerBackend::Fragment && !computeTracerAvailable_) {
+        return physics::TracerBackend::Fragment;
+    }
+    // The wavefront path implements the Kerr integrator only. At zero spin the
+    // renderer uses the planar Schwarzschild solver, whose state is a different
+    // shape entirely, so there is nothing for the scheduler to schedule.
+    if (backend == physics::TracerBackend::Wavefront &&
+        std::abs(parameters_.spin) <= 1e-4f) {
+        return physics::TracerBackend::Compute;
+    }
+    return backend;
+}
+
+void Application::ensureWavefrontBuffers(std::size_t rayCount) {
+    if (rayStateBuffer_ != 0 && rayCount <= wavefrontRayCapacity_) {
+        return;
+    }
+    releaseWavefrontBuffers();
+
+    // 96 bytes per ray, matching RayState in wavefront_common.glsl.
+    constexpr std::size_t kRayStateBytes = 96;
+    wavefrontRayCapacity_ = rayCount;
+
+    glGenBuffers(1, &rayStateBuffer_);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, rayStateBuffer_);
+    glBufferData(GL_SHADER_STORAGE_BUFFER,
+                 static_cast<GLsizeiptr>(rayCount * kRayStateBytes), nullptr, GL_DYNAMIC_COPY);
+
+    glGenBuffers(2, rayListBuffers_);
+    for (unsigned int buffer : rayListBuffers_) {
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffer);
+        glBufferData(GL_SHADER_STORAGE_BUFFER,
+                     static_cast<GLsizeiptr>(rayCount * sizeof(std::uint32_t)), nullptr,
+                     GL_DYNAMIC_COPY);
     }
 
+    // Counts, the indirect dispatch arguments and the small ring the CPU reads
+    // the live count from, all in one block so it can be bound once.
+    glGenBuffers(1, &wavefrontControlBuffer_);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, wavefrontControlBuffer_);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, kControlBytes, nullptr, GL_DYNAMIC_COPY);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+
+    std::cout << "Wavefront ray buffer: " << rayCount << " rays, "
+              << (rayCount * kRayStateBytes) / (1024 * 1024) << " MiB\n";
+}
+
+void Application::releaseWavefrontBuffers() {
+    if (rayStateBuffer_ != 0) {
+        glDeleteBuffers(1, &rayStateBuffer_);
+        rayStateBuffer_ = 0;
+    }
+    if (rayListBuffers_[0] != 0) {
+        glDeleteBuffers(2, rayListBuffers_);
+        rayListBuffers_[0] = 0;
+        rayListBuffers_[1] = 0;
+    }
+    if (wavefrontControlBuffer_ != 0) {
+        glDeleteBuffers(1, &wavefrontControlBuffer_);
+        wavefrontControlBuffer_ = 0;
+    }
+    wavefrontRayCapacity_ = 0;
+}
+
+void Application::renderSceneWavefront(float animationTime) {
+    const physics::BlackHoleParameters& p = parameters_;
+    const int spp = std::clamp(p.samplesPerFrame, 1, 8);
+    const std::size_t rayCount =
+        static_cast<std::size_t>(renderWidth_) * static_cast<std::size_t>(renderHeight_) *
+        static_cast<std::size_t>(spp);
+    ensureWavefrontBuffers(rayCount);
+
+    // Clear the counts, the dispatch arguments and the history ring together.
+    const std::array<std::uint32_t, kControlWords> zeroed{};
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, wavefrontControlBuffer_);
+    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, kControlBytes, zeroed.data());
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, rayStateBuffer_);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, wavefrontControlBuffer_);
+    glBindBuffer(GL_DISPATCH_INDIRECT_BUFFER, wavefrontControlBuffer_);
+
+    // ---- Primary rays ------------------------------------------------------
+    int survivors = 1;  // index of the list the survivors are currently in
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, rayListBuffers_[0]);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, rayListBuffers_[1]);
+    wavefrontGenerateProgram_.bind();
+    setTracerUniforms(wavefrontGenerateProgram_, animationTime);
+    {
+        const int groupsX = (renderWidth_ + 7) / 8;
+        const int groupsY = (renderHeight_ + 7) / 8;
+        glDispatchCompute(static_cast<GLuint>(groupsX), static_cast<GLuint>(groupsY), 1);
+    }
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+    // ---- Chunked advance ---------------------------------------------------
+    const int chunk = std::max(p.wavefrontChunkSteps, 1);
+    const int stepBudget = std::clamp(2 * (p.maxRaySteps > 0 ? p.maxRaySteps : 512), 1, 2048);
+    const int maxIterations = stepBudget / chunk + 2;
+    const std::uint32_t threshold = static_cast<std::uint32_t>(std::max(p.wavefrontFinishThreshold, 0));
+
+    // Uniforms are per-program state and none of these change between chunks, so
+    // they are uploaded once rather than forty-odd times per chunk.
+    wavefrontTraceProgram_.bind();
+    setTracerUniforms(wavefrontTraceProgram_, animationTime);
+
+    for (int iteration = 0;; ++iteration) {
+        wavefrontPrepareProgram_.bind();
+        wavefrontPrepareProgram_.setUint("uIteration", static_cast<unsigned int>(iteration));
+        glDispatchCompute(1, 1, 1);
+        // The next dispatch reads its own size out of this buffer, so the
+        // command barrier matters as much as the storage one.
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_COMMAND_BARRIER_BIT);
+
+        if (iteration >= maxIterations) {
+            break;
+        }
+        // The count is read two iterations late, on purpose: asking for it as
+        // soon as it is written stalls the pipeline on every chunk, and the loop
+        // only needs to know roughly when the population has collapsed. Being
+        // late costs at most two extra chunks over rays that were nearly done.
+        if (iteration >= 2) {
+            std::uint32_t live = 0;
+            const GLintptr slot =
+                static_cast<GLintptr>((kControlHistoryWord + ((iteration - 2) & 3)) *
+                                      sizeof(std::uint32_t));
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, wavefrontControlBuffer_);
+            glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, slot, sizeof(live), &live);
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+            if (live <= threshold) {
+                break;
+            }
+        }
+
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, rayListBuffers_[survivors]);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, rayListBuffers_[1 - survivors]);
+        wavefrontTraceProgram_.bind();
+        wavefrontTraceProgram_.setInt("uChunkSteps", chunk);
+        glDispatchComputeIndirect(kControlIndirectByteOffset);
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+        survivors = 1 - survivors;
+    }
+
+    // ---- Whatever is left, in one pass -------------------------------------
+    // The last prepare already sized this dispatch, so if nothing survived it
+    // launches zero workgroups and costs nothing.
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, rayListBuffers_[survivors]);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, rayListBuffers_[1 - survivors]);
+    wavefrontTraceProgram_.bind();
+    wavefrontTraceProgram_.setInt("uChunkSteps", stepBudget);
+    glDispatchComputeIndirect(kControlIndirectByteOffset);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    glBindBuffer(GL_DISPATCH_INDIRECT_BUFFER, 0);
+
+    // ---- Back to pixels ----------------------------------------------------
+    glBindImageTexture(0, sceneTarget_.texture(), 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA16F);
+    wavefrontShadeProgram_.bind();
+    setTracerUniforms(wavefrontShadeProgram_, animationTime);
+    dispatchOverImage(8, 8);
+}
+
+void Application::setTracerUniforms(renderer::ShaderProgram& program, float animationTime) {
     const glm::mat4 projection =
         glm::perspective(glm::radians(camera_.verticalFovDegrees()),
                          static_cast<float>(renderWidth_) / static_cast<float>(renderHeight_),
@@ -549,23 +745,43 @@ void Application::renderScene(float animationTime) {
     program.setInt("uShowHorizonGuide", p.showHorizonGuide ? 1 : 0);
     program.setInt("uShowPhotonSphereGuide", p.showPhotonSphereGuide ? 1 : 0);
 
-    if (useCompute) {
-        // Round up: the shader discards the invocations that land outside the
-        // image. The compiled workgroup size is used rather than the parameter,
-        // because the parameter only takes effect at the next shader reload and
-        // a mismatch here would silently leave a band of the image untraced.
-        const int groupsX = (renderWidth_ + computeGroupXCompiled_ - 1) / computeGroupXCompiled_;
-        const int groupsY = (renderHeight_ + computeGroupYCompiled_ - 1) / computeGroupYCompiled_;
-        glDispatchCompute(static_cast<GLuint>(groupsX), static_cast<GLuint>(groupsY), 1);
-        // accumulate samples this target with an ordinary texture fetch on the
-        // very next pass, so the image writes have to be made visible to the
-        // texture unit before it runs.
-        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
-    } else {
+}
+
+void Application::renderScene(float animationTime) {
+    blackHoleTimer_.begin();
+    switch (activeTracerBackend()) {
+    case physics::TracerBackend::Wavefront:
+        renderSceneWavefront(animationTime);
+        break;
+    case physics::TracerBackend::Compute:
+        // The compute pass writes the scene target through an image unit, so it
+        // wants no framebuffer and no blend state at all.
+        glBindImageTexture(0, sceneTarget_.texture(), 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA16F);
+        blackHoleComputeProgram_.bind();
+        setTracerUniforms(blackHoleComputeProgram_, animationTime);
+        dispatchOverImage(computeGroupXCompiled_, computeGroupYCompiled_);
+        break;
+    case physics::TracerBackend::Fragment:
+    default:
+        sceneTarget_.bindForFullWrite();
+        glDisable(GL_BLEND);
+        blackHoleProgram_.bind();
+        setTracerUniforms(blackHoleProgram_, animationTime);
         glBindVertexArray(fullscreenVao_);
         glDrawArrays(GL_TRIANGLES, 0, 3);
+        break;
     }
     blackHoleTimer_.end();
+}
+
+// Rounds the dispatch up over the render target; the shaders discard whatever
+// lands outside it.  The barrier is what lets the accumulate pass, which reads
+// this target with an ordinary texture fetch, see the image writes.
+void Application::dispatchOverImage(int groupX, int groupY) {
+    const int groupsX = (renderWidth_ + groupX - 1) / groupX;
+    const int groupsY = (renderHeight_ + groupY - 1) / groupY;
+    glDispatchCompute(static_cast<GLuint>(groupsX), static_cast<GLuint>(groupsY), 1);
+    glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
 }
 
 unsigned int Application::accumulateScene() {

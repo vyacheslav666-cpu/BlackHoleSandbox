@@ -1,0 +1,54 @@
+#version 460 core
+
+// Wavefront pass 1: build the primary rays.
+//
+// One invocation per pixel, looping over its sub-samples, so the rays it writes
+// are exactly the rays renderPixel would have traced. sampleUv is shared with
+// renderPixel precisely so the two cannot drift.
+
+// The tracer this includes contains derivative calls -- the starfield's
+// fwidth(), the horizon guide's dFdx() -- and GLSL requires the extension and a
+// derivative group for a compute stage to *compile* them, whether or not they
+// are ever reached. Nothing in this pass reaches them: the background and the
+// guides are shaded in wavefront_shade.comp, where the derivatives are genuine.
+// The group shape below therefore only has to satisfy the compiler.
+#extension GL_NV_compute_shader_derivatives : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(derivative_group_quadsNV) in;
+
+#include "black_hole_common.glsl"
+#include "wavefront_common.glsl"
+
+void main()
+{
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = ivec2(max(uResolution, vec2(1.0)));
+    if (pixel.x >= size.x || pixel.y >= size.y)
+    {
+        return;
+    }
+
+    int spp = clamp(uSamplesPerFrame, 1, 8);
+    uint pixelIndex = uint(pixel.y) * uint(size.x) + uint(pixel.x);
+    vec2 pixelUv = (vec2(pixel) + 0.5) / vec2(size);
+
+    for (int s = 0; s < 8; ++s)
+    {
+        if (s >= spp) break;
+
+        vec3 direction = reconstructWorldRay(sampleUv(pixelUv, s, spp));
+        TraceResult trace;
+        bool done;
+        KerrRay ray = kerrBegin(uCameraPosition, direction, trace, done);
+
+        uint rayIndex = rayIndexFor(pixelIndex, s, spp);
+        uRays[rayIndex] = packRay(ray, trace, pixelIndex);
+        // A ray that is already over -- the camera inside the horizon -- never
+        // enters the live list at all.
+        if (!done)
+        {
+            uListOut[atomicAdd(uControl[kControlLiveOut], 1u)] = rayIndex;
+        }
+    }
+}

@@ -1,0 +1,44 @@
+#version 460 core
+
+// Wavefront pass 4: turn finished rays back into pixels.
+//
+// This has to be an image-space pass. The starfield's filter width and the
+// horizon guide's edge are screen-space derivatives, and in the compacted ray
+// list an invocation's neighbours are unrelated pixels -- derivatives taken
+// there would be noise. Here a workgroup is a tile of adjacent pixels again, so
+// they mean what they mean everywhere else in the renderer.
+#extension GL_NV_compute_shader_derivatives : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(derivative_group_quadsNV) in;
+
+layout(binding = 0, rgba16f) uniform writeonly image2D uHdrImage;
+
+#include "black_hole_common.glsl"
+#include "wavefront_common.glsl"
+
+void main()
+{
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = ivec2(max(uResolution, vec2(1.0)));
+    if (pixel.x >= size.x || pixel.y >= size.y)
+    {
+        return;
+    }
+
+    int spp = clamp(uSamplesPerFrame, 1, 8);
+    uint pixelIndex = uint(pixel.y) * uint(size.x) + uint(pixel.x);
+
+    vec3 accumulated = vec3(0.0);
+    for (int s = 0; s < 8; ++s)
+    {
+        if (s >= spp) break;
+
+        KerrRay ray;
+        TraceResult traceState;
+        unpackRay(uRays[rayIndexFor(pixelIndex, s, spp)], ray, traceState);
+        accumulated += shadeTraceResult(traceState);
+    }
+
+    imageStore(uHdrImage, pixel, vec4(max(accumulated / float(spp), vec3(0.0)), 1.0));
+}

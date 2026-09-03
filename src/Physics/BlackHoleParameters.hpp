@@ -74,6 +74,17 @@ constexpr float kErgosphereEquatorInMass = 2.0f;
 
 enum class QualityPreset : int { Low, Medium, High, Ultra };
 
+// Which implementation of the tracer runs the pass.  All three are built from
+// one shared body and differ only in how the work is scheduled, so this is an
+// A/B switch on a single build rather than three renderers.
+//
+//   Fragment   the original: one fullscreen triangle, one ray per fragment.
+//   Compute    the same, dispatched as a grid of workgroups writing an image.
+//   Wavefront  rays parked in a buffer and advanced a chunk at a time, with the
+//              survivors compacted between chunks so a warp stops being held
+//              hostage by its slowest ray.  Kerr only.
+enum class TracerBackend : int { Fragment, Compute, Wavefront };
+
 enum class DebugMode : int {
     FinalRender,
     RawLensing,
@@ -122,12 +133,26 @@ struct BlackHoleParameters {
     float rayStepMax = 0.25f;
 
     // ---- Tracer backend ---------------------------------------------------
+    // Which of the three implementations of the same tracer runs the pass.
     // The ray-tracing pass exists as both a fragment and a compute shader, built
     // from one shared body so they cannot drift.  Both are compiled every run so
     // the two can be compared on a single build; this only chooses which one the
     // frame dispatches.  Fragment is the default because it is the path every
     // reference image was made with.
-    bool useComputeTracer = false;
+    TracerBackend tracerBackend = TracerBackend::Fragment;
+    // Steps a wavefront chunk takes before parking every ray and compacting the
+    // survivors.  Small chunks compact more often, which is the point, but each
+    // one pays a full round trip of the ray state through memory.
+    //
+    // Measured on an RTX 5070 Laptop the sweep is monotonic: every increase in
+    // the chunk is an improvement, all the way up to the whole step budget --
+    // which is another way of saying the compaction never earns back the traffic
+    // it costs.  The default is therefore the largest value that still chunks at
+    // all, and the honest summary is in docs/ARCHITECTURE.md.
+    int wavefrontChunkSteps = 256;
+    // Once this few rays are still alive, chunking has nothing left to save and
+    // the remainder is finished in a single pass with the whole budget.
+    int wavefrontFinishThreshold = 4096;
     // Workgroup size of the compute tracer.  Applied when the shaders are
     // compiled, so changing it in the UI needs a shader reload.
     int computeGroupX = 8;
@@ -226,6 +251,8 @@ struct BlackHoleParameters {
         // override the quality preset.
         rayStepMax = std::clamp(rayStepMax, rayStep, 1.0f);
         // 1024 is the guaranteed minimum for the product of the local sizes.
+        wavefrontChunkSteps = std::clamp(wavefrontChunkSteps, 1, 512);
+        wavefrontFinishThreshold = std::clamp(wavefrontFinishThreshold, 0, 1 << 24);
         computeGroupX = std::clamp(computeGroupX, 1, 64);
         computeGroupY = std::clamp(computeGroupY, 1, 64);
         while (computeGroupX * computeGroupY > 1024) {

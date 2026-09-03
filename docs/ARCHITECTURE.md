@@ -38,7 +38,8 @@ Shaders in [`shaders/`](../shaders), all sharing one vertex stage:
 | `fullscreen.vert` | One oversized triangle covering the viewport. No vertex buffer, no attributes — `glDrawArrays(GL_TRIANGLES, 0, 3)`. |
 | `black_hole_common.glsl` | **The renderer.** Two geodesic integrators (planar Schwarzschild and full Kerr), volumetric disk transfer, starfield, all debug views. Heavily commented. Not a stage of its own: included by both entry points below. |
 | `black_hole.frag` | Fragment entry point. Takes the pixel from the interpolated `vUv`, writes a colour attachment. |
-| `black_hole.comp` | Compute entry point. Takes the pixel from `gl_GlobalInvocationID`, writes through `imageStore`. Selected with `--set compute=1`. |
+| `black_hole.comp` | Compute entry point. Takes the pixel from `gl_GlobalInvocationID`, writes through `imageStore`. Selected with `--set tracer=compute`. |
+| `wavefront_*.comp`, `wavefront_common.glsl` | A third scheduling of the same tracer: rays parked in a buffer and advanced a chunk at a time, compacted in between. Kept because it is measured, not because it is fast — see below. |
 | `accumulate.frag` | Progressive refinement: a running arithmetic mean of jittered frames. |
 | `bloom_downsample.frag` | One level of the bloom pyramid's downsample chain; level 0 also does the bright pass. |
 | `bloom_upsample.frag` | One level of the upsample chain, blended into the finer level. |
@@ -217,6 +218,46 @@ Against the reference images the compute path lands at RMSE 0.000088–0.000191,
 worst channel 6–12 levels out of 255: the arithmetic is identical but its order
 is not, and half-float rounding differs accordingly. 32×1 is a different image
 (RMSE 0.026–0.061) because of the derivative footprint, not the port.
+
+### A third scheduling: wavefront, and why it is not the default
+
+The premise is sound and the numbers are not. Neighbouring rays in this scene
+differ by an order of magnitude in how many steps they need -- a ray that sails
+past the hole finishes in a few dozen, one grazing the photon sphere takes many
+hundreds -- and a warp runs until its slowest lane is done. The wavefront path
+attacks that directly: every ray is advanced by a fixed chunk of steps, parked in
+an SSBO, and the survivors compacted into a dense list before the next chunk, so
+a lane is never held by a ray that finished long ago.
+
+It is implemented, it is correct, and it renders **byte-identically to the
+compute path** on all five scenes. It is also the slowest of the three, on every
+scene:
+
+| ms, min of three runs | wide | closeup | edge-on | kerr | ultra |
+| --- | --- | --- | --- | --- | --- |
+| fragment | 4.142 | 10.738 | 13.258 | 13.831 | 22.770 |
+| compute | 3.666 | 9.651 | 12.527 | 11.453 | 19.836 |
+| wavefront | 4.950 | 11.725 | 14.501 | 14.353 | 23.699 |
+
+Two measurements say why, and they separate the two halves of the scheme cleanly.
+Running the wavefront path with a chunk larger than the whole step budget keeps
+every buffer and every pass but performs no compaction at all; on `closeup` that
+costs **+1.92 ms over compute, a flat 20% tax** for nothing but routing the ray
+state through memory. Then shrinking the chunk to 32, which is where compaction
+does the most work, adds a further **2.56 ms** rather than giving any of it back.
+
+So the compaction is not merely failing to pay for its traffic. It is negative at
+every chunk size tried, and the chunk sweep is monotonic -- 16, 32, 64, 128, 256,
+512 steps improve in that order, with the optimum at "do not chunk". Ninety-six
+bytes of ray state read and written per live ray per chunk is simply worth more
+than the lanes the compaction recovers, on a laptop part where bandwidth is the
+scarce resource. The disk and jet are integrated along the path, so the state
+cannot shrink much: sixteen of its twenty-four floats are load-bearing.
+
+It stays in the tree because the result is worth keeping and the switch costs
+nothing -- `--set tracer=wavefront`, with `--set wavefront-chunk` and
+`--set wavefront-threshold` to re-run the sweep on other hardware, where a part
+with more bandwidth per FLOP could plausibly come out the other way.
 
 ---
 

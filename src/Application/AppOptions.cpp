@@ -34,6 +34,13 @@ bool toBool(std::string_view text) {
     return text == "1" || text == "true" || text == "on" || text == "yes";
 }
 
+physics::TracerBackend parseTracerBackend(std::string_view text) {
+    if (text == "fragment") return physics::TracerBackend::Fragment;
+    if (text == "compute") return physics::TracerBackend::Compute;
+    if (text == "wavefront") return physics::TracerBackend::Wavefront;
+    fail("Unknown tracer \"" + std::string(text) + "\" (fragment|compute|wavefront)");
+}
+
 // Named renderer parameters reachable through --set name=value.  Keeping this
 // as one table means a new slider is exposed to the capture tool for free.
 void applyNamedParameter(physics::BlackHoleParameters& p, std::string_view name, std::string_view value) {
@@ -47,7 +54,12 @@ void applyNamedParameter(physics::BlackHoleParameters& p, std::string_view name,
     else if (name == "weak-field")          p.weakFieldRadius = number();
     else if (name == "ray-step-growth")     p.rayStepGrowth = number();
     else if (name == "ray-step-max")        p.rayStepMax = number();
-    else if (name == "compute")             p.useComputeTracer = toBool(value);
+    else if (name == "compute")             p.tracerBackend = toBool(value)
+                                                ? physics::TracerBackend::Compute
+                                                : physics::TracerBackend::Fragment;
+    else if (name == "tracer")               p.tracerBackend = parseTracerBackend(value);
+    else if (name == "wavefront-chunk")      p.wavefrontChunkSteps = toInt(value, name);
+    else if (name == "wavefront-threshold")  p.wavefrontFinishThreshold = toInt(value, name);
     else if (name == "compute-group-x")     p.computeGroupX = toInt(value, name);
     else if (name == "compute-group-y")     p.computeGroupY = toInt(value, name);
     else if (name == "disk-inner")        { p.diskInnerRadius = number(); p.lockDiskToIsco = false; }
@@ -133,10 +145,15 @@ std::string commandLineHelp() {
            "    bloom-threshold bloom-knee bloom-scale bloom-blend bloom-levels\n"
            "    tone-mapper\n"
            "    render-scale lock-isco horizon-guide photon-guide\n"
-           "    compute compute-group-x compute-group-y\n\n"
-           "  --set compute=1       Trace in a compute shader instead of a fragment\n"
-           "                        shader. Both are built from one shared body, so\n"
-           "                        this is an A/B switch on a single build.\n";
+           "    compute compute-group-x compute-group-y\n"
+           "    tracer wavefront-chunk wavefront-threshold\n\n"
+           "  --set tracer=NAME     fragment | compute | wavefront. Three schedulings\n"
+           "                        of one shared tracer, so this is an A/B switch on a\n"
+           "                        single build rather than three renderers.\n"
+           "                        (--set compute=1 is a synonym for tracer=compute.)\n"
+           "                        wavefront implements the Kerr solver only and falls\n"
+           "                        back to compute at zero spin. It is measurably the\n"
+           "                        slowest of the three; see docs/ARCHITECTURE.md.\n";
     return out.str();
 }
 
