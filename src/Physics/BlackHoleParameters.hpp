@@ -105,6 +105,13 @@ struct BlackHoleParameters {
     float rayStep = 0.040f;   // Base RK4 angular increment dphi, in radians.
     int maxRaySteps = 420;    // Integration budget per ray.
     float escapeRadius = 90.0f;
+    // Closest approach, in Schwarzschild radii, past which a ray is deflected
+    // by the weak-field series instead of being integrated step by step.  It
+    // buys nothing on its own: a ray also has to miss the disk and the jet
+    // before the shortcut is allowed.  Raising it integrates more of the frame
+    // exactly; 0 switches the shortcut off altogether, which is the honest way
+    // to measure what it costs in accuracy.
+    float weakFieldRadius = 25.0f;
 
     // ---- Accretion disk --------------------------------------------------
     bool lockDiskToIsco = true;
@@ -190,6 +197,10 @@ struct BlackHoleParameters {
         rayStep = std::clamp(rayStep, 0.002f, 0.12f);
         maxRaySteps = std::clamp(maxRaySteps, 16, 2048);
         escapeRadius = std::clamp(escapeRadius, 20.0f, 400.0f);
+        // Zero is meaningful (shortcut off); anything positive is held above
+        // the photon sphere, below which the weak-field series is nonsense.
+        weakFieldRadius = weakFieldRadius <= 0.0f ? 0.0f
+                                                  : std::clamp(weakFieldRadius, 2.0f, 400.0f);
 
         if (lockDiskToIsco) {
             // The ISCO moves with the spin: prograde orbits reach far closer

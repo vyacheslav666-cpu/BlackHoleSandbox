@@ -386,6 +386,7 @@ std::uint64_t Application::renderStateFingerprint() const {
     f.add(p.rayStep);
     f.add(p.maxRaySteps);
     f.add(p.escapeRadius);
+    f.add(p.weakFieldRadius);
     f.add(p.diskInnerRadius);
     f.add(p.diskOuterRadius);
     f.add(p.diskHalfThickness);
@@ -458,6 +459,7 @@ void Application::renderScene(float animationTime) {
     blackHoleProgram_.setFloat("uRayStep", p.rayStep);
     blackHoleProgram_.setInt("uMaxRaySteps", p.maxRaySteps);
     blackHoleProgram_.setFloat("uEscapeRadius", p.escapeRadius);
+    blackHoleProgram_.setFloat("uWeakFieldRadius", p.weakFieldRadius);
 
     blackHoleProgram_.setFloat("uDiskInnerRadius", p.diskInnerRadius);
     blackHoleProgram_.setFloat("uDiskOuterRadius", p.diskOuterRadius);

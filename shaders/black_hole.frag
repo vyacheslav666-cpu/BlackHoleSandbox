@@ -81,6 +81,10 @@ uniform float uSpin;                // Dimensionless spin a* = a/M, in [-1, 1].
 uniform float uRayStep;             // Base RK4 angular increment dphi.
 uniform int   uMaxRaySteps;         // Integration budget per ray.
 uniform float uEscapeRadius;        // Radius treated as "far away".
+// Closest approach, in r_s, beyond which the geodesic is replaced by the
+// weak-field deflection series instead of being integrated. 0 disables the
+// shortcut and always integrates.
+uniform float uWeakFieldRadius;
 
 // ---- Accretion disk ---------------------------------------------------------
 uniform float uDiskInnerRadius;
@@ -1222,6 +1226,81 @@ vec3 spinFrameToWorld(vec3 v) { return vec3(v.x, v.z, -v.y); }
 // The ray tracer
 // =============================================================================
 
+// =============================================================================
+// Weak-field shortcut
+// =============================================================================
+//
+// Radius of closest approach, in closed form.
+//
+// The turning point is where the radial potential vanishes,
+//
+//     (dU/dphi)^2 = 1/B^2 - U^2 + U^3 = 0,   U = r_s/r,  B = b/r_s
+//
+// so U_p is a root of the cubic U^3 - U^2 + 1/B^2 = 0. Depressing it with
+// U = w + 1/3 gives w^3 - w/3 + (1/B^2 - 2/27) = 0, which has three real roots
+// whenever B is above the critical parameter, and the trigonometric form solves
+// it without a single iteration:
+//
+//     U_k = 1/3 + (2/3) cos( theta/3 - 2 pi k / 3 ),  theta = acos(1 - 27/(2B^2))
+//
+// k = 0 is the root inside the horizon and k = 2 is negative; k = 1 is the
+// periapsis. At the critical parameter B = 3 sqrt(3)/2 the argument of the
+// arccosine is exactly -1 and the formula returns 1.5 r_s, the photon sphere,
+// which is the correct limit. Below that there is no turning point at all --
+// the clamp pins the result there, and since the caller only accepts radii far
+// larger than 1.5 r_s, such a ray is rejected on its own.
+float schwarzschildPeriapsis(float impactParameter, float rs)
+{
+    float b = max(impactParameter / max(rs, 1e-6), 1e-6);
+    float theta = acos(clamp(1.0 - 13.5 / (b * b), -1.0, 1.0));
+    const float kTwoThirdsPi = 2.0943951023931953;
+    float turningU = 1.0 / 3.0 + (2.0 / 3.0) * cos(theta / 3.0 - kTwoThirdsPi);
+    return rs / max(turningU, 1e-6);
+}
+
+// Does the segment [origin, origin + direction * travel] come within `radius` of
+// the y axis at any point where |y| <= halfHeight?
+//
+// Deliberately conservative: it may answer "yes" for a segment that in fact
+// misses, but never "no" for one that touches. Both volumes the ray has to be
+// proven clear of -- the disk slab and the jet -- are cylinders about the y
+// axis, so one test serves for both.
+bool segmentTouchesAxialCylinder(vec3 origin, vec3 direction, float travel,
+                                 float radius, float halfHeight)
+{
+    // Clip the segment to the |y| <= halfHeight slab first.
+    float tEnter = 0.0;
+    float tExit = travel;
+    if (abs(direction.y) < 1e-9)
+    {
+        if (abs(origin.y) > halfHeight)
+        {
+            return false;
+        }
+    }
+    else
+    {
+        float ta = (-halfHeight - origin.y) / direction.y;
+        float tb = ( halfHeight - origin.y) / direction.y;
+        tEnter = max(tEnter, min(ta, tb));
+        tExit  = min(tExit,  max(ta, tb));
+        if (tEnter >= tExit)
+        {
+            return false;
+        }
+    }
+
+    // Then minimise the distance to the axis over what is left, which is one
+    // clamped quadratic.
+    vec2 axialOffset = origin.xz;
+    vec2 axialStep = direction.xz;
+    float stepLengthSq = dot(axialStep, axialStep);
+    float t = stepLengthSq > 1e-12
+                  ? clamp(-dot(axialOffset, axialStep) / stepLengthSq, tEnter, tExit)
+                  : tEnter;
+    return length(axialOffset + axialStep * t) <= radius;
+}
+
 TraceResult makeTrace(vec3 direction, float cameraRadius)
 {
     TraceResult trace;
@@ -1324,6 +1403,133 @@ TraceResult traceSchwarzschild(vec3 rayOrigin, vec3 initialDirection, bool ignor
     // buys fewer "useful" steps.
     int maxSteps = clamp(2 * (uMaxRaySteps > 0 ? uMaxRaySteps : 512), 1, kCompiledMaxRaySteps);
     float escapeU = rs / escapeRadius;
+
+    // ---- Weak-field shortcut ------------------------------------------------
+    // A ray that never comes near the hole barely bends, and stepping its
+    // geodesic all the way out to the escape radius is the largest single waste
+    // in a wide shot, where most of the frame is exactly that case.
+    //
+    // Everything needed to skip it is already known at this point. b is
+    // conserved, so the closest approach follows in closed form, and once that
+    // is a few tens of r_s the deflection is the textbook series
+    //
+    //     alpha = 2 (r_s/b) + (15 pi/16) (r_s/b)^2 + (16/3) (r_s/b)^3 + ...
+    //
+    // truncated here after the cubic term. At the default threshold the next
+    // term is of order 1e-6 rad, some three orders of magnitude below one pixel.
+    //
+    // The shortcut may only be taken when the ray provably touches neither the
+    // disk slab nor the jet, because both are sampled *along* the trajectory:
+    // skipping the integration for a ray that crosses them would not speed the
+    // disk up, it would delete its distant parts. Two independent tests are
+    // tried and either is sufficient:
+    //
+    //   * the closest approach lying outside the ball that contains the whole
+    //     disk. This is exact and needs no safety margin, because that closest
+    //     approach is a true minimum of the radius over the entire path;
+    //   * the straight-line segment missing the bounding cylinder inflated by
+    //     the furthest the bending can carry the ray sideways, alpha * path
+    //     length. That covers the case the ball test cannot certify -- a ray
+    //     passing cleanly over or under the disk on its way past.
+    //
+    // Only the escape direction is approximated. Nothing here is used for rays
+    // that reach the disk, the jet or the horizon, so no image feature is drawn
+    // from the approximation; the shortcut only decides which patch of distant
+    // sky a ray that was always going to miss everything ends up sampling.
+    float weakFieldRadius = max(uWeakFieldRadius, 0.0) * rs;
+    if (weakFieldRadius > 0.0)
+    {
+        float periapsisRadius = schwarzschildPeriapsis(impactParameter, rs);
+        // An outbound ray never reaches its periapsis: it is already receding,
+        // so the camera itself is the closest it ever gets.
+        float closestRadius = radialComponent < 0.0
+                                  ? min(periapsisRadius, cameraRadius)
+                                  : cameraRadius;
+
+        if (closestRadius > weakFieldRadius)
+        {
+            // Total asymptotic bend, and the largest sideways displacement it
+            // can produce over the whole traced path. The trajectory's tangent
+            // turns by at most alpha in total, so its distance from the initial
+            // straight line grows by at most alpha per unit length.
+            float inverseB = rs / max(impactParameter, 1e-6);
+            float totalDeflection =
+                inverseB * (2.0 + inverseB * (2.9452431 + inverseB * 5.3333333));
+            float pathLength = escapeRadius + cameraRadius;
+            float margin = totalDeflection * pathLength;
+
+            // The disk is bounded by the cylinder rho <= outerRadius,
+            // |y| <= slabHalfHeight, which sits inside a ball of this radius.
+            float diskBallRadius = length(vec2(outerRadius, slabHalfHeight));
+            bool clearOfDisk = ignoreDisk
+                            || closestRadius > diskBallRadius
+                            || !segmentTouchesAxialCylinder(rayOrigin, initialDirection, pathLength,
+                                                            outerRadius + margin,
+                                                            slabHalfHeight + margin);
+
+            // Spin is zero on this path, so a jet that scales with a* is not
+            // drawn here at all and needs no test.
+            bool jetVisible = uJetPower > 0.0 && uJetScalesWithSpin == 0;
+            float jetHalfLength = max(uJetLength, 1.0);
+            // Matches the bound accumulateJetSegment rejects against.
+            float jetWidest =
+                jetRadiusAtHeight(jetHalfLength, max(uJetBaseRadius, 0.02), uJetCollimation) * 2.5;
+            bool clearOfJet = ignoreDisk
+                           || !jetVisible
+                           || !segmentTouchesAxialCylinder(rayOrigin, initialDirection, pathLength,
+                                                           jetWidest + margin,
+                                                           jetHalfLength + margin);
+
+            if (clearOfDisk && clearOfJet)
+            {
+                // Distribute the bend along the path the way the leading order
+                // does. Writing x for the distance along the straight ray from
+                // its closest approach, the deflection accumulated up to that
+                // point is (alpha/2)(x/r + 1), so between the camera and the
+                // escape radius it is (alpha/2)(x_end/r_end - x_cam/r_cam).
+                // x_cam/r_cam is exactly radialComponent, and at the far end the
+                // ray is outbound, so x_end/r_end is the positive root.
+                float flatImpact = cameraRadius * tangentLength;
+                float sineAtEscape = min(flatImpact / escapeRadius, 1.0);
+                float cosineAtEscape = sqrt(max(1.0 - sineAtEscape * sineAtEscape, 0.0));
+                float bend = max(0.5 * totalDeflection * (cosineAtEscape - radialComponent), 0.0);
+
+                // The integrator does not hand the starfield the direction a
+                // static observer at the escape radius would measure. It hands
+                // it dx/dphi in Schwarzschild coordinates, and the two differ by
+                // the lapse on the radial component alone:
+                //
+                //     sin psi_local = (b/r) sqrt(1 - r_s/r)
+                //     sin psi_coord = b / sqrt(r^2 + b^2 r_s/r)
+                //
+                // The gap is only O(r_s/r), but at the default escape radius it
+                // is still 1.2e-3 rad -- more than a pixel at 720p, and enough
+                // to visibly shift a star. Both angles are measured from the
+                // same radius vector in the same plane, so the difference is
+                // just extra rotation in the same sense as the deflection, and
+                // the endpoint's radius vector never has to be worked out.
+                float lapseAtEscape = max(1.0 - rs / escapeRadius, 0.0);
+                float sineLocal = (impactParameter / escapeRadius) * sqrt(lapseAtEscape);
+                float sineCoordinate =
+                    impactParameter * inversesqrt(escapeRadius * escapeRadius
+                                                  + impactParameter * impactParameter * rs
+                                                        / escapeRadius);
+                bend += asin(clamp(sineCoordinate, -1.0, 1.0))
+                      - asin(clamp(sineLocal, -1.0, 1.0));
+
+                // Unit vector perpendicular to the ray, pointing at the hole:
+                // the direction the deflection turns towards.
+                vec3 inward = -tangentLength * radialBasis + radialComponent * azimuthBasis;
+
+                trace.state = kTraceEscaped;
+                trace.steps = 1;
+                trace.minRadius = closestRadius;
+                trace.escapeDirection =
+                    normalize(initialDirection * cos(bend) + inward * sin(bend));
+                return trace;
+            }
+        }
+    }
 
     vec3 previousPosition = rayOrigin;
     float previousPhi = phi;

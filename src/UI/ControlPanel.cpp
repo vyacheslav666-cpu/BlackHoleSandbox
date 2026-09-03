@@ -207,6 +207,17 @@ ControlPanelActions ControlPanel::draw(bool& visible, physics::BlackHoleParamete
         ImGui::SliderFloat("Escape radius", &p.escapeRadius, 20.0f, 400.0f, "%.0f units");
         helpMarker("Radius at which remaining curvature is treated as negligible\n"
                    "and the ray direction is handed to the starfield.");
+        ImGui::SliderFloat("Weak-field shortcut", &p.weakFieldRadius, 0.0f, 60.0f,
+                           p.weakFieldRadius <= 0.0f ? "off" : "%.0f r_s");
+        helpMarker("A ray whose closest approach exceeds this, and which provably\n"
+                   "misses both the disk slab and the jet, is not integrated at all:\n"
+                   "it is deflected by the weak-field series 2 r_s/b + ... instead.\n"
+                   "Debug mode 2 shows exactly where it applies -- those pixels cost\n"
+                   "one step.\n\n"
+                   "Lower is faster and less accurate. Drag it down and watch the\n"
+                   "starfield at the edge of frame: the shortcut only ever moves\n"
+                   "background stars, since a ray that reaches the disk or the hole\n"
+                   "never qualifies for it. Zero switches it off entirely.");
         const float totalSweep = static_cast<float>(p.maxRaySteps) * p.rayStep;
         ImGui::TextDisabled("Budget covers up to %.1f rad (%.2f full orbits)",
                             static_cast<double>(totalSweep),

@@ -186,6 +186,50 @@ adaptive stepping. That is a deliberate real-time choice: neighbouring pixels
 then do predictable amounts of work, which matters enormously for GPU warp
 coherence, and there is no temporal popping when the camera moves.
 
+**The weak-field shortcut — NUMERICAL.** Stepping in `φ` costs the same number
+of steps whether a ray grazes the photon sphere or sails past at fifty `r_s`,
+because the angular sweep out to the escape radius is comparable either way. For
+the distant ray that work buys almost nothing: `b` is conserved, so its closest
+approach is already known before the first step, as the outer turning point of
+
+```
+    U³ − U² + 1/B² = 0,   U = r_s/r,  B = b/r_s
+```
+
+which the trigonometric form of the cubic solves outright. Past a few tens of
+`r_s` the trajectory is the textbook weak-field one and the total bend is
+
+```
+    α = 2(r_s/b) + (15π/16)(r_s/b)² + (16/3)(r_s/b)³ + …
+```
+
+so `weakFieldRadius` (`--set weak-field`, default 25 `r_s`, 0 to disable) lets
+such a ray skip the integration entirely and be rotated by `α` instead.
+
+Two guards make this safe rather than merely fast. The ray must **provably miss
+both the disk slab and the jet**, since those are sampled *along* the path and
+skipping the march would delete distant disk rather than accelerate it: either
+its closest approach lies outside the ball containing the whole disk — exact, as
+that closest approach is a true minimum of the radius — or the straight segment
+misses the bounding cylinder inflated by `α ×` path length, which is the
+furthest the bending can carry the ray sideways. And the deflection is
+distributed along the path by `(α/2)(x/r − x₀/r₀)`, then rotated by the lapse
+gap between the locally measured direction and the Schwarzschild coordinate
+direction the integrator actually reports at the escape radius; skipping that
+second step leaves a systematic 1.2 × 10⁻³ rad error, over a pixel at 720p.
+
+Measured against a reference integration of the same ODE, the residual is 0.1–0.8
+px for closest approaches from 30 down to 15 `r_s`, growing past a pixel below
+about 12 `r_s`. Nothing drawn from the approximation is ever a disk, jet or
+horizon feature — only which patch of distant sky a ray that was always going to
+miss everything ends up sampling. Debug view 2 shows exactly where it applies:
+those pixels report one step.
+
+The Kerr solver has no counterpart, and needs none. It steps in an affine
+parameter capped at a quarter of the current radius, so a background ray reaches
+the escape radius in a number of steps that grows only logarithmically — debug
+view 2 shows its periphery already cold.
+
 **Known limitations:**
 
 * Rays extremely close to `b_crit` need unbounded winding. When the step budget

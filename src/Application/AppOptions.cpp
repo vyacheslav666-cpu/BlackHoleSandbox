@@ -44,6 +44,7 @@ void applyNamedParameter(physics::BlackHoleParameters& p, std::string_view name,
     else if (name == "ray-step")            p.rayStep = number();
     else if (name == "max-steps")           p.maxRaySteps = toInt(value, name);
     else if (name == "escape-radius")       p.escapeRadius = number();
+    else if (name == "weak-field")          p.weakFieldRadius = number();
     else if (name == "disk-inner")        { p.diskInnerRadius = number(); p.lockDiskToIsco = false; }
     else if (name == "disk-outer")          p.diskOuterRadius = number();
     else if (name == "disk-thickness")      p.diskHalfThickness = number();
@@ -119,7 +120,8 @@ std::string commandLineHelp() {
            "  --quality low|medium|high|ultra\n"
            "  --debug N             Debug view 0..9 (0 = final render).\n"
            "  --set name=value      Any renderer parameter; repeatable.\n\n"
-           "  --set names: rs ray-step max-steps escape-radius disk-inner disk-outer\n"
+           "  --set names: rs ray-step max-steps escape-radius weak-field disk-inner\n"
+           "    disk-outer\n"
            "    disk-thickness disk-flare disk-brightness disk-temperature disk-density\n"
            "    disk-opacity disk-turbulence disk-direction orbit-speed doppler\n"
            "    gravitational-shift beaming star-density nebula spp exposure bloom\n"
