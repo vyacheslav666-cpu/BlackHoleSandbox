@@ -203,7 +203,24 @@ ControlPanelActions ControlPanel::draw(bool& visible, physics::BlackHoleParamete
                    "the ring region unstable (see debug mode 3, magenta pixels).");
         ImGui::SliderFloat("Angular step dphi", &p.rayStep, 0.002f, 0.12f, "%.4f rad");
         helpMarker("Base Runge-Kutta step in the orbital angle. The shader shrinks\n"
-                   "it automatically in high curvature and near the disk.");
+                   "it automatically in high curvature and near the disk, and opens\n"
+                   "it up again far from both.");
+        ImGui::SliderFloat("Step growth", &p.rayStepGrowth, 0.0f, 0.4f,
+                           p.rayStepGrowth <= 0.0f ? "off" : "%.3f / r_s");
+        helpMarker("How fast the step opens up with distance. Out where the ray is\n"
+                   "nearly straight the equation is just u'' + u = 0 and a step ten\n"
+                   "times the base one still resolves it; near the hole, and inside\n"
+                   "the disk slab or the jet, the step is capped as before, so this\n"
+                   "only ever affects the part of the path that was costing steps\n"
+                   "for nothing. Zero restores a flat schedule.\n\n"
+                   "Watch it in debug mode 2: the background should darken without\n"
+                   "the photon ring changing.");
+        ImGui::SliderFloat("Step ceiling", &p.rayStepMax, p.rayStep, 0.6f, "%.3f rad");
+        helpMarker("Hard upper bound on dphi. An accuracy limit rather than a\n"
+                   "quality dial: far from the hole u(phi) is a sinusoid, and past\n"
+                   "roughly 0.3 rad a step stops resolving it however large the\n"
+                   "growth is. Held at or above the base step, so it restrains the\n"
+                   "growth without ever overriding the quality preset.");
         ImGui::SliderFloat("Escape radius", &p.escapeRadius, 20.0f, 400.0f, "%.0f units");
         helpMarker("Radius at which remaining curvature is treated as negligible\n"
                    "and the ray direction is handed to the starfield.");

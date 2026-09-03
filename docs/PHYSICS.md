@@ -172,19 +172,49 @@ angular sweep needed to reach infinity is bounded (`Δφ ≈ b/r` at large `r`).
 It makes the problem well-conditioned in exactly the region that matters.
 
 **Local error** is `O(h⁵)` per step; global error `O(h⁴)`. The step is adapted
-by two rules:
+by four rules:
 
 1. **Curvature.** `h` shrinks by up to 3.6× as `u` grows, because the `(3/2)u²`
    term stiffens near the hole.
-2. **Disk sampling.** When the ray is inside the disk's radial range and close
-   to its plane, `h` is capped so the chord length `≈ r·h` stays small compared
-   with the disk's scale height. Without this, a coarse step jumps straight
-   over a thin disk.
+2. **Straightness.** Out where that term is negligible the equation is just
+   `u'' + u = 0`, a plain harmonic oscillator in `φ`, and the only thing left to
+   resolve is a sinusoid. `h` therefore grows in proportion to the radius,
+   `rayStepGrowth` per `r_s` (`--set ray-step-growth`, default 0.15, 0 for a
+   flat schedule), up to the absolute ceiling `rayStepMax`
+   (`--set ray-step-max`, default 0.25 rad).
+
+   The ceiling is an accuracy limit, not a quality dial. RK4's phase error on a
+   sinusoid accumulates as `Φ h⁴/120`, so over a typical `Φ ≈ 3` rad sweep
+   `h = 0.25` costs about 10⁻⁴ rad — a tenth of a pixel — while `h = 0.4` costs
+   six times that, and measurably moves background stars. It is held at or above
+   `rayStep`, so it restrains the growth without ever overriding `--quality`.
+3. **Disk and jet.** The whole disk fits inside one ball about the origin, and
+   staying outside that ball is *sufficient* to miss it — so the step simply
+   does not grow inside it, in either direction of travel, and outside it a step
+   is not allowed to cross into it. Both are thresholds on `u` itself, and
+   `du/dφ` is `v`, so the entire test is one divide with no square root and no
+   position lookup. That matters: it runs on every step of every ray, including
+   the ones near the hole that can never benefit from it. The jet is the one
+   hazard not contained in a ball, and gets a real distance test on the rare
+   settings where it is drawn on this path at all.
+4. **The escape radius, exactly.** The last step is aimed so the ray lands on
+   `uEscapeRadius` rather than wherever it happened to overshoot to. Without
+   this the direction handed to the starfield is read off at a step-size
+   dependent radius, so *any* change to the schedule moves every background
+   star — which is by far the most visible error the renderer can make, since a
+   star is a delta function and a fraction of a pixel of shift swings a channel
+   by a third of its range. Landing deliberately removes that coupling, and
+   makes `uEscapeRadius` mean what its name says.
 
 This is a *bounded, deterministic* schedule rather than true error-controlled
 adaptive stepping. That is a deliberate real-time choice: neighbouring pixels
 then do predictable amounts of work, which matters enormously for GPU warp
 coherence, and there is no temporal popping when the camera moves.
+
+Because the growth spends the budget where the trajectory actually bends, it
+also *reduces* the number of rays that run out of it. With the budget cut until
+it bites, the count of magenta pixels in debug view 3 falls by 4–9%; at the
+default budget there are none either way.
 
 **The weak-field shortcut — NUMERICAL.** Stepping in `φ` costs the same number
 of steps whether a ray grazes the photon sphere or sails past at fifty `r_s`,

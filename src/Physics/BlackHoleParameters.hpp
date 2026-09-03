@@ -112,6 +112,14 @@ struct BlackHoleParameters {
     // exactly; 0 switches the shortcut off altogether, which is the honest way
     // to measure what it costs in accuracy.
     float weakFieldRadius = 25.0f;
+    // How fast the angular step opens up as the ray gets further out, as extra
+    // step per Schwarzschild radius of distance.  0 restores the flat schedule
+    // where dphi never exceeds rayStep anywhere.
+    float rayStepGrowth = 0.15f;
+    // Absolute ceiling on dphi.  This is an accuracy limit rather than a
+    // quality dial: far from the hole u(phi) is a sinusoid, and a step much
+    // larger than this stops resolving it whatever rayStep says.
+    float rayStepMax = 0.25f;
 
     // ---- Accretion disk --------------------------------------------------
     bool lockDiskToIsco = true;
@@ -201,6 +209,10 @@ struct BlackHoleParameters {
         // the photon sphere, below which the weak-field series is nonsense.
         weakFieldRadius = weakFieldRadius <= 0.0f ? 0.0f
                                                   : std::clamp(weakFieldRadius, 2.0f, 400.0f);
+        rayStepGrowth = std::clamp(rayStepGrowth, 0.0f, 2.0f);
+        // Never below rayStep: the ceiling restrains growth, it does not
+        // override the quality preset.
+        rayStepMax = std::clamp(rayStepMax, rayStep, 1.0f);
 
         if (lockDiskToIsco) {
             // The ISCO moves with the spin: prograde orbits reach far closer

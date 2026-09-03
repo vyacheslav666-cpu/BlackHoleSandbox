@@ -85,6 +85,11 @@ uniform float uEscapeRadius;        // Radius treated as "far away".
 // weak-field deflection series instead of being integrated. 0 disables the
 // shortcut and always integrates.
 uniform float uWeakFieldRadius;
+// Angular step schedule.  uRayStep is the base increment and stays the overall
+// quality control; these two say how far the step is allowed to open up once
+// the ray is out where the trajectory is nearly straight.
+uniform float uRayStepGrowth;   // Extra step per r_s of radius. 0 = fixed step.
+uniform float uRayStepMax;      // Hard ceiling on dphi, in radians.
 
 // ---- Accretion disk ---------------------------------------------------------
 uniform float uDiskInnerRadius;
@@ -1301,6 +1306,16 @@ bool segmentTouchesAxialCylinder(vec3 origin, vec3 direction, float travel,
     return length(axialOffset + axialStep * t) <= radius;
 }
 
+// Distance from a point to the solid cylinder {rho <= radius, |y| <= halfHeight}
+// about the y axis, and zero anywhere inside it.  The step schedule uses this to
+// find out how far it may travel before it could possibly reach the disk or the
+// jet.
+float distanceToAxialCylinder(vec3 position, float radius, float halfHeight)
+{
+    vec2 outside = vec2(length(position.xz) - radius, abs(position.y) - halfHeight);
+    return length(max(outside, vec2(0.0)));
+}
+
 TraceResult makeTrace(vec3 direction, float cameraRadius)
 {
     TraceResult trace;
@@ -1404,6 +1419,28 @@ TraceResult traceSchwarzschild(vec3 rayOrigin, vec3 initialDirection, bool ignor
     int maxSteps = clamp(2 * (uMaxRaySteps > 0 ? uMaxRaySteps : 512), 1, kCompiledMaxRaySteps);
     float escapeU = rs / escapeRadius;
 
+    // ---- Volumes the ray is sampled inside -----------------------------------
+    // The disk and the jet are integrated *along* the trajectory, so both the
+    // shortcut below and the step schedule inside the loop have to know where
+    // they are: one to refuse to skip them, the other to refuse to step over
+    // them.  The bounds are inflated to exactly what the near-disk test and
+    // accumulateJetSegment already reject against, so "clear of the disk" means
+    // the same thing everywhere in this function.
+    float hazardDiskRadius = outerRadius * 1.15;
+    float hazardDiskHeight = slabHalfHeight * 2.5;
+    // The whole disk fits inside this ball, so the step schedule can keep
+    // clear of the disk by watching u alone.  Expressed as a value of u,
+    // since that is the variable being integrated.  A debug view that skips
+    // the disk has no inbound limit short of the horizon.
+    float hazardBallRadius = length(vec2(hazardDiskRadius, hazardDiskHeight));
+    float inboundLimitU = ignoreDisk ? 1.0 : rs / max(hazardBallRadius, 1e-4);
+    // Spin is zero on this path, so a jet that scales with a* is not drawn here
+    // at all and is not a hazard.
+    bool jetVisible = uJetPower > 0.0 && uJetScalesWithSpin == 0;
+    float jetHalfLength = max(uJetLength, 1.0);
+    float jetWidest =
+        jetRadiusAtHeight(jetHalfLength, max(uJetBaseRadius, 0.02), uJetCollimation) * 2.5;
+
     // ---- Weak-field shortcut ------------------------------------------------
     // A ray that never comes near the hole barely bends, and stepping its
     // geodesic all the way out to the escape radius is the largest single waste
@@ -1467,13 +1504,6 @@ TraceResult traceSchwarzschild(vec3 rayOrigin, vec3 initialDirection, bool ignor
                                                             outerRadius + margin,
                                                             slabHalfHeight + margin);
 
-            // Spin is zero on this path, so a jet that scales with a* is not
-            // drawn here at all and needs no test.
-            bool jetVisible = uJetPower > 0.0 && uJetScalesWithSpin == 0;
-            float jetHalfLength = max(uJetLength, 1.0);
-            // Matches the bound accumulateJetSegment rejects against.
-            float jetWidest =
-                jetRadiusAtHeight(jetHalfLength, max(uJetBaseRadius, 0.02), uJetCollimation) * 2.5;
             bool clearOfJet = ignoreDisk
                            || !jetVisible
                            || !segmentTouchesAxialCylinder(rayOrigin, initialDirection, pathLength,
@@ -1544,26 +1574,114 @@ TraceResult traceSchwarzschild(vec3 rayOrigin, vec3 initialDirection, bool ignor
         }
 
         // ---- Adaptive angular step -----------------------------------------
-        // Two competing requirements:
+        // Three competing requirements:
         //  1. Curvature. The (3/2)u^2 term grows quickly near the hole, so the
         //     step shrinks as u rises. (u = 2/3 is the photon sphere.)
-        //  2. Disk sampling. When the ray is inside the disk's radial range and
+        //  2. Straightness. Out where that term is negligible the equation is
+        //     just u'' + u = 0 and the step can open up a long way, which is
+        //     where most of the budget was previously going to waste.
+        //  3. Disk sampling. When the ray is inside the disk's radial range and
         //     close to its plane, the chord length ~ r*h must stay small next to
         //     the disk thickness or thin structure gets stepped over.
-        float radius = rs / max(u, 1e-6);
+        float inverseU = 1.0 / max(u, 1e-6);
+        float radius = rs * inverseU;
         float curvature = smoothstep(0.12, 0.95, u);
         float h = baseStep * mix(1.0, 0.28, curvature);
 
+        if (uRayStepGrowth > 0.0)
+        {
+            // Growth is a multiplier on the curvature schedule rather than an
+            // alternative to it, so opening the step up far away can never undo
+            // the shrink near the hole.
+            float opened = min(h * (1.0 + uRayStepGrowth * max(inverseU - 1.0, 0.0)),
+                               max(uRayStepMax, baseStep));
+
+            // A long step must not cross either landmark in u.
+            //
+            //   * Falling inwards, that is the ball containing the whole disk.
+            //     Staying outside the ball is *sufficient* to miss the disk, so
+            //     bounding the change in r is enough and the sideways motion
+            //     need not be considered at all.
+            //   * Receding, it is the escape radius. The direction handed to the
+            //     starfield is read off wherever the ray lands, so a long final
+            //     step would report it from far outside uEscapeRadius and shift
+            //     every background star.
+            //
+            // Both are thresholds on u itself and du/dphi is v, so the whole
+            // test is one divide -- no square root, no position, and nothing
+            // that varies within a warp. That matters: this runs on every step
+            // of every ray, including the ones near the hole that can never
+            // benefit from it.
+            float outsideBall = inboundLimitU - u;      // positive only outside it
+            // 0.9 rather than 1, because du over a step is v*h only to first
+            // order and the curvature term adds to it.
+            opened = min(opened, 0.9 * outsideBall / max(v, 1e-6));
+
+            // Inside that ball the ray can cross the disk slab on any step,
+            // travelling in either direction -- coming back out through the
+            // slab is just as easy as falling in through it -- so the step
+            // never grows there at all and the schedule above stands unchanged.
+            opened = outsideBall > 0.0 ? opened : h;
+
+            if (jetVisible)
+            {
+                // The jet is the one hazard that is not contained in a ball
+                // about the origin -- it is a tall thin cylinder, and a receding
+                // ray can still drift into it sideways. It is only ever drawn on
+                // this path when the Blandford-Znajek coupling is switched off,
+                // and uJetScalesWithSpin is a uniform, so this branch costs
+                // nothing whenever the jet is absent.
+                float roomToJet = distanceToAxialCylinder(previousPosition, jetWidest,
+                                                          jetHalfLength);
+                float radialRate = rs * abs(v) * inverseU * inverseU;   // |dr/dphi|
+                float chordPerRadian = sqrt(radialRate * radialRate + radius * radius);
+                opened = min(opened, 0.5 * roomToJet / max(chordPerRadian, 1e-6));
+            }
+
+            // Growth may only ever open the step, never close it.
+            h = max(h, opened);
+        }
+
         if (!ignoreDisk)
         {
-            bool nearDisk = radius < outerRadius * 1.15
-                         && abs(previousPosition.y) < slabHalfHeight * 2.5;
+            bool nearDisk = radius < hazardDiskRadius
+                         && abs(previousPosition.y) < hazardDiskHeight;
             if (nearDisk)
             {
                 // chord ~ radius * h, so h ~ desiredChord / radius.
                 float desiredChord = max(slabHalfHeight * 0.45, 0.02 * rs);
                 h = min(h, max(desiredChord / max(radius, 1e-4), baseStep * 0.12));
             }
+        }
+
+        // Explicit bounds. The floor is the one the disk cap already used; the
+        // ceiling is an absolute accuracy limit, not a quality setting, because
+        // what it protects against is under-resolving the sinusoid that u(phi)
+        // becomes far from the hole. It is held at or above baseStep so it can
+        // only ever restrain the growth, never override --quality.
+        h = clamp(h, baseStep * 0.12, max(uRayStepMax, baseStep));
+
+        // Aim the last step at the escape radius exactly.
+        //
+        // The loop below stops once u has fallen past escapeU, and hands the
+        // starfield the direction at whatever u the step happened to land on --
+        // which depends on the step size, and so on the whole history of the
+        // schedule. Every ray therefore reported its direction from a slightly
+        // different radius, and any change to the stepping moved all of them.
+        // On a starfield that is the most visible error there is: a background
+        // star is a delta function, and shifting it by a fraction of a pixel
+        // swings a channel by a third of its range.
+        //
+        // Landing on escapeU deliberately removes that coupling. It also makes
+        // uEscapeRadius mean what its name says: the radius the direction is
+        // actually reported from, rather than an approximate lower bound on it.
+        // The floor is insurance -- a step that only ever approached escapeU
+        // asymptotically would never cross it and would burn the whole budget --
+        // though in practice dv/dphi = (3/2)u^2 - u is negative out here, so the
+        // aimed step always overshoots slightly and crosses on the first try.
+        if (v < 0.0)
+        {
+            h = min(h, max((u - escapeU) / max(-v, 1e-6), baseStep * 0.12));
         }
 
         integrateGeodesicRk4(u, v, h);
