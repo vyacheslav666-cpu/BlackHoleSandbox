@@ -49,8 +49,11 @@ $scenes = @(
        note = 'many rays orbit near the photon sphere' },
     @{ name = 'edge-on'; args = @('--distance', '14', '--pitch', '0');
        note = 'disk seen edge-on, long paths through it' },
+    # The default spin is 0.85, so every scene here runs the Kerr solver, not
+    # the planar Schwarzschild reduction. This one pushes the spin close to
+    # extremal and the camera close in on top of that.
     @{ name = 'kerr';    args = @('--set', 'spin=0.95', '--distance', '8');
-       note = 'the general Kerr solver instead of the planar one' },
+       note = 'near-extremal spin, camera deep in the strong field' },
     @{ name = 'ultra';   args = @('--quality', 'ultra', '--distance', '14');
        note = 'high step budget, two rays per pixel per frame' }
 )
