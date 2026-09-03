@@ -29,6 +29,10 @@ param(
     [switch]$UpdateReference,
     [switch]$Determinism,
     [string]$Only = '',
+    # Extra arguments appended to every scene, for A/B-ing a renderer option on
+    # one build -- "--set compute=1", say. They are deliberately not part of the
+    # scene table: the scenes define what is being measured, this defines how.
+    [string]$Extra = '',
     [int]$Samples = 96,
     [int]$Width = 1280,
     [int]$Height = 720
@@ -158,7 +162,7 @@ function Read-TimingLine($lines) {
 }
 
 function Invoke-Shot($scene, [string]$path) {
-    $arguments = @('--shot', $path) + $commonArgs + $scene.args
+    $arguments = @('--shot', $path) + $commonArgs + $scene.args + $extraArgs
     $output = & $Exe @arguments
     if ($LASTEXITCODE -ne 0) {
         throw "$($scene.name): renderer exited with $LASTEXITCODE"
@@ -173,12 +177,16 @@ $Exe = (Resolve-Path $Exe).Path
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $OutDir = (Resolve-Path $OutDir).Path
 
+$extraArgs = @()
+if ($Extra -ne '') { $extraArgs = $Extra -split '\s+' | Where-Object { $_ -ne '' } }
+
 $selected = $scenes | Where-Object { $Only -eq '' -or $_.name -like "*$Only*" }
 if (-not $selected) { throw "No scene matches -Only '$Only'" }
 
 Write-Host "Renderer : $Exe"
 Write-Host "Output   : $OutDir"
 Write-Host "Scenes   : $Width x $Height, $Samples samples, --time 0"
+if ($Extra -ne '') { Write-Host "Extra    : $Extra" }
 Write-Host ''
 
 $results = @()

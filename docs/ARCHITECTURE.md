@@ -1,6 +1,6 @@
 # Architecture
 
-A deliberately small C++20 host driving one heavy fragment shader. The split is
+A deliberately small C++20 host driving one heavy ray-tracing shader. The split is
 strict: the CPU owns the window, the camera, the parameters and the pass
 ordering; the GPU owns every single ray.
 
@@ -25,7 +25,7 @@ main.cpp
 | [`src/Application/Application.*`](../src/Application/Application.hpp) | Window, GL context, ImGui, render targets, pass ordering, both main loops. |
 | [`src/Camera/Camera.*`](../src/Camera/Camera.hpp) | Orbit and free-flight camera. Orbit mode always looks at the origin, which is the black hole. |
 | [`src/Physics/BlackHoleParameters.hpp`](../src/Physics/BlackHoleParameters.hpp) | The single struct describing a frame, its clamping rules, the landmark radii, and the quality presets. |
-| [`src/Renderer/ShaderProgram.*`](../src/Renderer/ShaderProgram.hpp) | Move-only RAII GLSL program with actionable compile/link errors. |
+| [`src/Renderer/ShaderProgram.*`](../src/Renderer/ShaderProgram.hpp) | Move-only RAII GLSL program with actionable compile/link errors. Also a small `#include` preprocessor, since GLSL has none and the tracer is shared between two stages. |
 | [`src/Renderer/RenderTarget.*`](../src/Renderer/RenderTarget.hpp) | One colour attachment plus its framebuffer, in RGBA16F, RGBA32F or RGBA8. |
 | [`src/Renderer/ImageWriter.*`](../src/Renderer/ImageWriter.hpp) | Dependency-free PNG writer (stored-deflate) used by screenshots and `--shot`. |
 | [`src/Renderer/GpuTimer.*`](../src/Renderer/GpuTimer.hpp) | `GL_TIME_ELAPSED` query ring that measures what the ray-tracing pass actually costs on the GPU. |
@@ -36,7 +36,9 @@ Shaders in [`shaders/`](../shaders), all sharing one vertex stage:
 | Shader | Role |
 | --- | --- |
 | `fullscreen.vert` | One oversized triangle covering the viewport. No vertex buffer, no attributes — `glDrawArrays(GL_TRIANGLES, 0, 3)`. |
-| `black_hole.frag` | **The renderer.** Two geodesic integrators (planar Schwarzschild and full Kerr), volumetric disk transfer, starfield, all debug views. Heavily commented. |
+| `black_hole_common.glsl` | **The renderer.** Two geodesic integrators (planar Schwarzschild and full Kerr), volumetric disk transfer, starfield, all debug views. Heavily commented. Not a stage of its own: included by both entry points below. |
+| `black_hole.frag` | Fragment entry point. Takes the pixel from the interpolated `vUv`, writes a colour attachment. |
+| `black_hole.comp` | Compute entry point. Takes the pixel from `gl_GlobalInvocationID`, writes through `imageStore`. Selected with `--set compute=1`. |
 | `accumulate.frag` | Progressive refinement: a running arithmetic mean of jittered frames. |
 | `bloom_downsample.frag` | One level of the bloom pyramid's downsample chain; level 0 also does the bright pass. |
 | `bloom_upsample.frag` | One level of the upsample chain, blended into the finer level. |
@@ -48,7 +50,7 @@ Shaders in [`shaders/`](../shaders), all sharing one vertex stage:
 
 ```
                  ┌──────────────────────────────────────────┐
-   camera  ─────►│ black_hole.frag                          │
+   camera  ─────►│ black_hole.frag / .comp                  │
    params  ─────►│   ray generation (jittered)              │
                  │   RK4 geodesic integration               │──► sceneTarget_
                  │   volumetric disk transfer               │    RGBA16F
@@ -92,7 +94,7 @@ already-clipped colours.
 
 The single biggest quality win in the renderer, and it is almost free.
 
-`black_hole.frag` offsets its ray by a **Halton (2,3)** sub-pixel position that
+The tracer offsets its ray by a **Halton (2,3)** sub-pixel position that
 changes every frame. `accumulate.frag` keeps a running arithmetic mean:
 
 ```
@@ -155,6 +157,66 @@ reviewable without a human watching.
 
 [`tools/render_sheet.ps1`](../tools/render_sheet.ps1) drives it over a fixed set
 of viewpoints and every debug mode.
+
+---
+
+## Two tracer backends, one tracer
+
+The ray-tracing pass exists as both a fragment and a compute shader. They are not
+two implementations: [`black_hole_common.glsl`](../shaders/black_hole_common.glsl)
+holds the entire tracer and both entry points include it, so there is one copy of
+the physics and it cannot drift. The wrappers are eighteen and sixty-eight lines,
+and all either does is decide where a pixel coordinate comes from and where the
+colour goes:
+
+| | fragment | compute |
+| --- | --- | --- |
+| pixel | interpolated `vUv` | `(gl_GlobalInvocationID.xy + 0.5) / resolution` |
+| output | colour attachment | `imageStore` into an `rgba16f image2D` |
+| dispatch | one oversized triangle | workgroups rounded up over the image |
+
+GLSL has no `#include`, so `ShaderProgram` implements one — the alternative was
+two copies of a two-thousand-line tracer. Each file gets a source-string number
+and a `#line` directive, so a compile error still names a real line in a real
+file.
+
+**Why the compute path needs an extension.** The tracer takes screen-space
+derivatives, and not for anything exotic: the starfield sizes its anti-aliasing
+filter with `fwidth()` on every ray of every frame, because lensing stretches the
+sky so violently near the shadow that a fixed filter width is unusable. Core
+OpenGL gives a compute stage no derivatives at all, so the port requires
+`NV_compute_shader_derivatives`. Without it the starfield would have to be
+rewritten and this would stop being a port, so the compute path is simply not
+offered and the fragment path is unaffected.
+
+Derivatives need 2×2 quads of invocations. `derivative_group_quadsNV` builds them
+from the local invocation's x and y, exactly as the fragment stage does, which is
+why 8×8 and 16×16 reproduce the fragment footprint and render **identically to
+each other**. A workgroup with an odd dimension cannot form those quads and falls
+back to `derivative_group_linearNV`, which pairs up four *consecutive*
+invocations instead — still a filter width, but not the same one.
+
+`--set compute=1` switches paths on a running build; `--set compute-group-x/-y`
+picks the workgroup, applied when the shader is compiled. Measured at 1280×720,
+96 samples, minimum of three runs:
+
+| | wide | closeup | edge-on | kerr | ultra |
+| --- | --- | --- | --- | --- | --- |
+| fragment, ms | 4.206 | 10.861 | 13.809 | 14.239 | 23.187 |
+| compute 8×8 | 1.07× | 1.06× | 1.03× | 1.17× | 1.09× |
+| compute 16×16 | 1.09× | 1.05× | 1.04× | 1.14× | 1.09× |
+| compute 32×1 | 0.91× | 0.82× | 0.91× | 0.83× | 0.88× |
+
+8×8 and 16×16 are within noise of each other and a little ahead of the fragment
+path. 32×1 is 9–18% *behind* it, which is what a thin strip of pixels should do:
+a warp then covers 32 pixels in a row rather than an 8×4 tile, and neighbouring
+rays in a row diverge more than neighbouring rays in a square. The gap is widest
+on `closeup`, where divergence is worst.
+
+Against the reference images the compute path lands at RMSE 0.000088–0.000191,
+worst channel 6–12 levels out of 255: the arithmetic is identical but its order
+is not, and half-float rounding differs accordingly. 32×1 is a different image
+(RMSE 0.026–0.061) because of the derivative footprint, not the port.
 
 ---
 

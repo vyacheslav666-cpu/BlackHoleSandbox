@@ -1,0 +1,68 @@
+#version 460 core
+
+// Compute entry point for the HDR ray-tracing pass.
+//
+// The pass itself lives in black_hole_common.glsl, shared verbatim with
+// black_hole.frag. Only two things differ here: the pixel coordinate comes from
+// gl_GlobalInvocationID rather than an interpolated varying, and the result goes
+// out through imageStore rather than a colour attachment.
+//
+// WHY THE EXTENSION IS REQUIRED
+// -----------------------------
+// The tracer takes screen-space derivatives. Not for anything exotic -- the
+// starfield uses fwidth() to size its anti-aliasing filter, and it does so on
+// every ray of every frame, because gravitational lensing stretches the sky so
+// violently that a fixed filter width is not usable. Compute shaders have no
+// implicit derivatives in core OpenGL, so a faithful port needs
+// NV_compute_shader_derivatives; without it the starfield would have to be
+// rewritten, and this stopped being a port.
+//
+// Derivatives need 2x2 quads of invocations. `derivative_group_quadsNV` builds
+// them from the x and y of the local invocation, which is what the fragment
+// stage does and therefore reproduces its footprint exactly -- but it needs both
+// local sizes to be even. A group with an odd dimension falls back to
+// `derivative_group_linearNV`, which quads up four *consecutive* invocations
+// instead; that still yields a filter width, but not the same one, so such a
+// group shape does not render identically. That is a property of the shape, not
+// of the port.
+#extension GL_NV_compute_shader_derivatives : require
+
+#ifndef BHS_LOCAL_SIZE_X
+#define BHS_LOCAL_SIZE_X 8
+#endif
+#ifndef BHS_LOCAL_SIZE_Y
+#define BHS_LOCAL_SIZE_Y 8
+#endif
+
+layout(local_size_x = BHS_LOCAL_SIZE_X, local_size_y = BHS_LOCAL_SIZE_Y, local_size_z = 1) in;
+
+#if (BHS_LOCAL_SIZE_X % 2) == 0 && (BHS_LOCAL_SIZE_Y % 2) == 0
+layout(derivative_group_quadsNV) in;
+#else
+layout(derivative_group_linearNV) in;
+#endif
+
+layout(binding = 0, rgba16f) uniform writeonly image2D uHdrImage;
+
+#include "black_hole_common.glsl"
+
+void main()
+{
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = ivec2(max(uResolution, vec2(1.0)));
+    // The dispatch is rounded up to whole groups, so the last row and column of
+    // groups can run past the image. Those invocations must not store -- but
+    // they must still reach the barrier inside the derivative quads, which is
+    // why this is a plain early-out and not a discard of the whole quad.
+    if (pixel.x >= size.x || pixel.y >= size.y)
+    {
+        return;
+    }
+
+    // The fragment stage receives vUv interpolated across the fullscreen
+    // triangle, which at a pixel centre is exactly (pixel + 0.5) / resolution.
+    // This reproduces that value rather than approximating it, so the two paths
+    // trace the same rays.
+    vec2 pixelUv = (vec2(pixel) + 0.5) / vec2(size);
+    imageStore(uHdrImage, pixel, renderPixel(pixelUv));
+}

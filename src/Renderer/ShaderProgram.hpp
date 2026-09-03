@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include <glad/gl.h>
 #include <glm/glm.hpp>
@@ -21,6 +22,11 @@ public:
 
     [[nodiscard]] static ShaderProgram fromFiles(const std::filesystem::path& vertexPath,
                                                   const std::filesystem::path& fragmentPath);
+    // `defines` is injected straight after the #version line, so the caller can
+    // specialise a shader without editing it -- the compute tracer uses it to
+    // fix its workgroup size at compile time.
+    [[nodiscard]] static ShaderProgram fromComputeFile(const std::filesystem::path& computePath,
+                                                       const std::string& defines = {});
     void bind() const;
     void reset();
 

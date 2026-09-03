@@ -47,6 +47,9 @@ void applyNamedParameter(physics::BlackHoleParameters& p, std::string_view name,
     else if (name == "weak-field")          p.weakFieldRadius = number();
     else if (name == "ray-step-growth")     p.rayStepGrowth = number();
     else if (name == "ray-step-max")        p.rayStepMax = number();
+    else if (name == "compute")             p.useComputeTracer = toBool(value);
+    else if (name == "compute-group-x")     p.computeGroupX = toInt(value, name);
+    else if (name == "compute-group-y")     p.computeGroupY = toInt(value, name);
     else if (name == "disk-inner")        { p.diskInnerRadius = number(); p.lockDiskToIsco = false; }
     else if (name == "disk-outer")          p.diskOuterRadius = number();
     else if (name == "disk-thickness")      p.diskHalfThickness = number();
@@ -129,7 +132,11 @@ std::string commandLineHelp() {
            "    gravitational-shift beaming star-density nebula spp exposure bloom\n"
            "    bloom-threshold bloom-knee bloom-scale bloom-blend bloom-levels\n"
            "    tone-mapper\n"
-           "    render-scale lock-isco horizon-guide photon-guide\n";
+           "    render-scale lock-isco horizon-guide photon-guide\n"
+           "    compute compute-group-x compute-group-y\n\n"
+           "  --set compute=1       Trace in a compute shader instead of a fragment\n"
+           "                        shader. Both are built from one shared body, so\n"
+           "                        this is an A/B switch on a single build.\n";
     return out.str();
 }
 

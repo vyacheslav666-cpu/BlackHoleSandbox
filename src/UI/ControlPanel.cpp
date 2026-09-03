@@ -235,6 +235,50 @@ ControlPanelActions ControlPanel::draw(bool& visible, physics::BlackHoleParamete
                    "starfield at the edge of frame: the shortcut only ever moves\n"
                    "background stars, since a ray that reaches the disk or the hole\n"
                    "never qualifies for it. Zero switches it off entirely.");
+        ImGui::BeginDisabled(!stats.computeTracerAvailable);
+        ImGui::Checkbox("Trace in a compute shader", &p.useComputeTracer);
+        ImGui::EndDisabled();
+        helpMarker(stats.computeTracerAvailable
+                       ? "Runs the identical tracer as a compute dispatch writing through\n"
+                         "an image, instead of a fragment shader writing a colour\n"
+                         "attachment. Both are compiled from one shared body, so this is\n"
+                         "an A/B switch and not a second implementation.\n\n"
+                         "The two agree to within float rounding rather than exactly --\n"
+                         "the arithmetic is identical but its order is not -- so flipping\n"
+                         "this restarts the refinement."
+                       : "Unavailable: this driver does not expose screen-space\n"
+                         "derivatives in a compute stage, which the starfield needs.");
+        if (stats.computeTracerAvailable) {
+            // A workgroup whose height is odd cannot form 2x2 derivative quads,
+            // which changes the starfield filter, so the choices are limited to
+            // the shapes that are worth measuring.
+            const std::array<const char*, 3> kGroupLabels = {"8 x 8", "16 x 16", "32 x 1"};
+            const std::array<std::pair<int, int>, 3> kGroupSizes = {{{8, 8}, {16, 16}, {32, 1}}};
+            int groupIndex = 0;
+            for (int i = 0; i < static_cast<int>(kGroupSizes.size()); ++i) {
+                if (kGroupSizes[i].first == p.computeGroupX &&
+                    kGroupSizes[i].second == p.computeGroupY) {
+                    groupIndex = i;
+                }
+            }
+            if (ImGui::Combo("Workgroup", &groupIndex, kGroupLabels.data(),
+                             static_cast<int>(kGroupLabels.size()))) {
+                p.computeGroupX = kGroupSizes[groupIndex].first;
+                p.computeGroupY = kGroupSizes[groupIndex].second;
+                // The size is compiled into the shader, so it only takes effect
+                // once the program is rebuilt.
+                actions.reloadShaders = true;
+            }
+            helpMarker("Workgroup shape of the compute tracer, fixed at compile time,\n"
+                       "so changing it recompiles the program.\n\n"
+                       "8x8 and 16x16 render identically and perform within noise of\n"
+                       "each other. 32x1 is slower -- a warp then covers a thin strip\n"
+                       "of pixels whose rays diverge more than a square tile's -- and\n"
+                       "it does not render the same image, because an odd workgroup\n"
+                       "height cannot form the 2x2 quads the starfield's derivatives\n"
+                       "need.");
+        }
+
         const float totalSweep = static_cast<float>(p.maxRaySteps) * p.rayStep;
         ImGui::TextDisabled("Budget covers up to %.1f rad (%.2f full orbits)",
                             static_cast<double>(totalSweep),

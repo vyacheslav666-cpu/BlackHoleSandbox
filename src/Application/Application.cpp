@@ -169,6 +169,16 @@ void Application::initialize() {
         glEnable(GL_DEBUG_OUTPUT);
         glDebugMessageCallback(glDebugCallback, nullptr);
     }
+
+    // The tracer takes screen-space derivatives -- the starfield sizes its
+    // anti-aliasing filter with fwidth() on every ray -- and core OpenGL gives a
+    // compute stage no derivatives at all.  Without the extension the compute
+    // path could only exist by rewriting that, so it is simply not offered.
+    computeTracerAvailable_ = GLAD_GL_NV_compute_shader_derivatives != 0;
+    if (!computeTracerAvailable_) {
+        std::cout << "Compute tracer unavailable: this driver does not expose "
+                     "GL_NV_compute_shader_derivatives. The fragment path is unaffected.\n";
+    }
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
 
@@ -268,6 +278,7 @@ void Application::shutdown() {
     captureTarget_.release();
     blackHoleTimer_.release();
     blackHoleProgram_.reset();
+    blackHoleComputeProgram_.reset();
     accumulateProgram_.reset();
     bloomDownsampleProgram_.reset();
     bloomUpsampleProgram_.reset();
@@ -310,7 +321,24 @@ void Application::loadShaders() {
                                                        shaderDirectory_ / "bloom_upsample.frag");
     auto postprocess = renderer::ShaderProgram::fromFiles(shaderDirectory_ / "fullscreen.vert",
                                                           shaderDirectory_ / "postprocess.frag");
+
+    // The workgroup size is fixed at compile time, so it is injected rather than
+    // edited into the shader.  Both sizes are recorded alongside the program:
+    // the dispatch has to round up by exactly what was compiled in.
+    renderer::ShaderProgram blackHoleCompute;
+    const int groupX = std::max(parameters_.computeGroupX, 1);
+    const int groupY = std::max(parameters_.computeGroupY, 1);
+    if (computeTracerAvailable_) {
+        const std::string defines = "#define BHS_LOCAL_SIZE_X " + std::to_string(groupX) +
+                                    "\n#define BHS_LOCAL_SIZE_Y " + std::to_string(groupY) + "\n";
+        blackHoleCompute =
+            renderer::ShaderProgram::fromComputeFile(shaderDirectory_ / "black_hole.comp", defines);
+    }
+
     blackHoleProgram_ = std::move(blackHole);
+    blackHoleComputeProgram_ = std::move(blackHoleCompute);
+    computeGroupXCompiled_ = groupX;
+    computeGroupYCompiled_ = groupY;
     accumulateProgram_ = std::move(accumulate);
     bloomDownsampleProgram_ = std::move(downsample);
     bloomUpsampleProgram_ = std::move(upsample);
@@ -319,7 +347,11 @@ void Application::loadShaders() {
     // Timings from the previous shaders describe code that is no longer
     // running, so they must not be averaged in with the new ones.
     blackHoleTimer_.resetStatistics();
-    std::cout << "Loaded GLSL shaders from " << shaderDirectory_.string() << '\n';
+    std::cout << "Loaded GLSL shaders from " << shaderDirectory_.string();
+    if (computeTracerAvailable_) {
+        std::cout << " (compute tracer at " << groupX << "x" << groupY << ")";
+    }
+    std::cout << '\n';
 }
 
 // =============================================================================
@@ -389,6 +421,9 @@ std::uint64_t Application::renderStateFingerprint() const {
     f.add(p.weakFieldRadius);
     f.add(p.rayStepGrowth);
     f.add(p.rayStepMax);
+    // The two tracers agree to within float rounding rather than exactly, so
+    // switching between them has to restart the average.
+    f.add(p.useComputeTracer);
     f.add(p.diskInnerRadius);
     f.add(p.diskOuterRadius);
     f.add(p.diskHalfThickness);
@@ -433,11 +468,24 @@ void Application::resetAccumulation() { accumulatedSamples_ = 0; }
 // =============================================================================
 
 void Application::renderScene(float animationTime) {
+    // The two tracers are built from one shared body and take the same uniforms,
+    // so everything between here and the dispatch is common to both.
+    const bool useCompute = parameters_.useComputeTracer && computeTracerAvailable_;
+    renderer::ShaderProgram& program =
+        useCompute ? blackHoleComputeProgram_ : blackHoleProgram_;
+
     // Measures the whole pass, state setup included.  The timer only observes;
     // it issues no draw of its own and changes nothing about the image.
     blackHoleTimer_.begin();
-    sceneTarget_.bindForFullWrite();
-    glDisable(GL_BLEND);
+    if (useCompute) {
+        // The compute pass writes the scene target through an image unit, so it
+        // wants no framebuffer and no blend state at all.
+        glBindImageTexture(0, sceneTarget_.texture(), 0, GL_FALSE, 0, GL_WRITE_ONLY,
+                           GL_RGBA16F);
+    } else {
+        sceneTarget_.bindForFullWrite();
+        glDisable(GL_BLEND);
+    }
 
     const glm::mat4 projection =
         glm::perspective(glm::radians(camera_.verticalFovDegrees()),
@@ -446,63 +494,77 @@ void Application::renderScene(float animationTime) {
     const glm::mat4 view = camera_.viewMatrix();
 
     const physics::BlackHoleParameters& p = parameters_;
-    blackHoleProgram_.bind();
-    blackHoleProgram_.setMat4("uInvProjection", glm::inverse(projection));
-    blackHoleProgram_.setMat4("uInvView", glm::inverse(view));
-    blackHoleProgram_.setVec3("uCameraPosition", camera_.position());
-    blackHoleProgram_.setVec2("uResolution", glm::vec2(renderWidth_, renderHeight_));
-    blackHoleProgram_.setFloat("uTime", animationTime);
-    blackHoleProgram_.setVec2("uJitter", glm::vec2(0.0f));
-    blackHoleProgram_.setInt("uSampleIndex", accumulatedSamples_);
-    blackHoleProgram_.setInt("uSamplesPerFrame", p.samplesPerFrame);
+    program.bind();
+    program.setMat4("uInvProjection", glm::inverse(projection));
+    program.setMat4("uInvView", glm::inverse(view));
+    program.setVec3("uCameraPosition", camera_.position());
+    program.setVec2("uResolution", glm::vec2(renderWidth_, renderHeight_));
+    program.setFloat("uTime", animationTime);
+    program.setVec2("uJitter", glm::vec2(0.0f));
+    program.setInt("uSampleIndex", accumulatedSamples_);
+    program.setInt("uSamplesPerFrame", p.samplesPerFrame);
 
-    blackHoleProgram_.setFloat("uSchwarzschildRadius", p.schwarzschildRadius);
-    blackHoleProgram_.setFloat("uSpin", p.spin);
-    blackHoleProgram_.setFloat("uRayStep", p.rayStep);
-    blackHoleProgram_.setInt("uMaxRaySteps", p.maxRaySteps);
-    blackHoleProgram_.setFloat("uEscapeRadius", p.escapeRadius);
-    blackHoleProgram_.setFloat("uWeakFieldRadius", p.weakFieldRadius);
-    blackHoleProgram_.setFloat("uRayStepGrowth", p.rayStepGrowth);
-    blackHoleProgram_.setFloat("uRayStepMax", p.rayStepMax);
+    program.setFloat("uSchwarzschildRadius", p.schwarzschildRadius);
+    program.setFloat("uSpin", p.spin);
+    program.setFloat("uRayStep", p.rayStep);
+    program.setInt("uMaxRaySteps", p.maxRaySteps);
+    program.setFloat("uEscapeRadius", p.escapeRadius);
+    program.setFloat("uWeakFieldRadius", p.weakFieldRadius);
+    program.setFloat("uRayStepGrowth", p.rayStepGrowth);
+    program.setFloat("uRayStepMax", p.rayStepMax);
 
-    blackHoleProgram_.setFloat("uDiskInnerRadius", p.diskInnerRadius);
-    blackHoleProgram_.setFloat("uDiskOuterRadius", p.diskOuterRadius);
-    blackHoleProgram_.setFloat("uDiskHalfThickness", p.diskHalfThickness);
-    blackHoleProgram_.setFloat("uDiskFlare", p.diskFlare);
-    blackHoleProgram_.setFloat("uDiskBrightness", p.diskBrightness);
-    blackHoleProgram_.setFloat("uDiskTemperature", p.diskTemperature);
-    blackHoleProgram_.setFloat("uDiskDensity", p.diskDensity);
-    blackHoleProgram_.setFloat("uDiskOpacity", p.diskOpacity);
-    blackHoleProgram_.setFloat("uDiskTurbulence", p.diskTurbulence);
-    blackHoleProgram_.setFloat("uDiskRotationDirection", p.diskRotationDirection);
-    blackHoleProgram_.setFloat("uArtisticOrbitSpeed", p.artisticOrbitSpeed);
+    program.setFloat("uDiskInnerRadius", p.diskInnerRadius);
+    program.setFloat("uDiskOuterRadius", p.diskOuterRadius);
+    program.setFloat("uDiskHalfThickness", p.diskHalfThickness);
+    program.setFloat("uDiskFlare", p.diskFlare);
+    program.setFloat("uDiskBrightness", p.diskBrightness);
+    program.setFloat("uDiskTemperature", p.diskTemperature);
+    program.setFloat("uDiskDensity", p.diskDensity);
+    program.setFloat("uDiskOpacity", p.diskOpacity);
+    program.setFloat("uDiskTurbulence", p.diskTurbulence);
+    program.setFloat("uDiskRotationDirection", p.diskRotationDirection);
+    program.setFloat("uArtisticOrbitSpeed", p.artisticOrbitSpeed);
 
-    blackHoleProgram_.setFloat("uJetPower", p.jetPower);
-    blackHoleProgram_.setInt("uJetScalesWithSpin", p.jetScalesWithSpin ? 1 : 0);
-    blackHoleProgram_.setFloat("uJetLength", p.jetLength);
-    blackHoleProgram_.setFloat("uJetBaseRadius", p.jetBaseRadius);
-    blackHoleProgram_.setFloat("uJetCollimation", p.jetCollimation);
-    blackHoleProgram_.setFloat("uJetLorentz", p.jetLorentz);
-    blackHoleProgram_.setFloat("uJetTemperature", p.jetTemperature);
-    blackHoleProgram_.setFloat("uJetTurbulence", p.jetTurbulence);
+    program.setFloat("uJetPower", p.jetPower);
+    program.setInt("uJetScalesWithSpin", p.jetScalesWithSpin ? 1 : 0);
+    program.setFloat("uJetLength", p.jetLength);
+    program.setFloat("uJetBaseRadius", p.jetBaseRadius);
+    program.setFloat("uJetCollimation", p.jetCollimation);
+    program.setFloat("uJetLorentz", p.jetLorentz);
+    program.setFloat("uJetTemperature", p.jetTemperature);
+    program.setFloat("uJetTurbulence", p.jetTurbulence);
 
-    blackHoleProgram_.setFloat("uPlungeFraction", p.plungeFraction);
-    blackHoleProgram_.setFloat("uAccretionRate", p.accretionRate);
-    blackHoleProgram_.setFloat("uIscoRadius", p.iscoRadius());
+    program.setFloat("uPlungeFraction", p.plungeFraction);
+    program.setFloat("uAccretionRate", p.accretionRate);
+    program.setFloat("uIscoRadius", p.iscoRadius());
 
-    blackHoleProgram_.setFloat("uDopplerStrength", p.dopplerStrength);
-    blackHoleProgram_.setFloat("uGravitationalShiftStrength", p.gravitationalShiftStrength);
-    blackHoleProgram_.setFloat("uBeamingStrength", p.beamingStrength);
+    program.setFloat("uDopplerStrength", p.dopplerStrength);
+    program.setFloat("uGravitationalShiftStrength", p.gravitationalShiftStrength);
+    program.setFloat("uBeamingStrength", p.beamingStrength);
 
-    blackHoleProgram_.setFloat("uStarDensity", p.starDensity);
-    blackHoleProgram_.setFloat("uNebulaStrength", p.nebulaStrength);
+    program.setFloat("uStarDensity", p.starDensity);
+    program.setFloat("uNebulaStrength", p.nebulaStrength);
 
-    blackHoleProgram_.setInt("uDebugMode", static_cast<int>(p.debugMode));
-    blackHoleProgram_.setInt("uShowHorizonGuide", p.showHorizonGuide ? 1 : 0);
-    blackHoleProgram_.setInt("uShowPhotonSphereGuide", p.showPhotonSphereGuide ? 1 : 0);
+    program.setInt("uDebugMode", static_cast<int>(p.debugMode));
+    program.setInt("uShowHorizonGuide", p.showHorizonGuide ? 1 : 0);
+    program.setInt("uShowPhotonSphereGuide", p.showPhotonSphereGuide ? 1 : 0);
 
-    glBindVertexArray(fullscreenVao_);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
+    if (useCompute) {
+        // Round up: the shader discards the invocations that land outside the
+        // image. The compiled workgroup size is used rather than the parameter,
+        // because the parameter only takes effect at the next shader reload and
+        // a mismatch here would silently leave a band of the image untraced.
+        const int groupsX = (renderWidth_ + computeGroupXCompiled_ - 1) / computeGroupXCompiled_;
+        const int groupsY = (renderHeight_ + computeGroupYCompiled_ - 1) / computeGroupYCompiled_;
+        glDispatchCompute(static_cast<GLuint>(groupsX), static_cast<GLuint>(groupsY), 1);
+        // accumulate samples this target with an ordinary texture fetch on the
+        // very next pass, so the image writes have to be made visible to the
+        // texture unit before it runs.
+        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
+    } else {
+        glBindVertexArray(fullscreenVao_);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+    }
     blackHoleTimer_.end();
 }
 
@@ -955,6 +1017,7 @@ void Application::drawControls() {
     stats.animationTime = animationTime_;
     stats.animationPaused = animationPaused_;
     stats.blackHoleFrames = static_cast<int>(blackHoleTimer_.sampleCount());
+    stats.computeTracerAvailable = computeTracerAvailable_;
     stats.blackHoleLastMs = blackHoleTimer_.lastMilliseconds();
     stats.blackHoleMedianMs = blackHoleTimer_.medianMilliseconds();
     stats.blackHoleP95Ms = blackHoleTimer_.percentileMilliseconds(0.95);

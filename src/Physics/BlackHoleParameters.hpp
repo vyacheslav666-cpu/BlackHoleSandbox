@@ -121,6 +121,18 @@ struct BlackHoleParameters {
     // larger than this stops resolving it whatever rayStep says.
     float rayStepMax = 0.25f;
 
+    // ---- Tracer backend ---------------------------------------------------
+    // The ray-tracing pass exists as both a fragment and a compute shader, built
+    // from one shared body so they cannot drift.  Both are compiled every run so
+    // the two can be compared on a single build; this only chooses which one the
+    // frame dispatches.  Fragment is the default because it is the path every
+    // reference image was made with.
+    bool useComputeTracer = false;
+    // Workgroup size of the compute tracer.  Applied when the shaders are
+    // compiled, so changing it in the UI needs a shader reload.
+    int computeGroupX = 8;
+    int computeGroupY = 8;
+
     // ---- Accretion disk --------------------------------------------------
     bool lockDiskToIsco = true;
     float diskInnerRadius = kIscoInRadii;
@@ -213,6 +225,13 @@ struct BlackHoleParameters {
         // Never below rayStep: the ceiling restrains growth, it does not
         // override the quality preset.
         rayStepMax = std::clamp(rayStepMax, rayStep, 1.0f);
+        // 1024 is the guaranteed minimum for the product of the local sizes.
+        computeGroupX = std::clamp(computeGroupX, 1, 64);
+        computeGroupY = std::clamp(computeGroupY, 1, 64);
+        while (computeGroupX * computeGroupY > 1024) {
+            computeGroupY = computeGroupY > 1 ? computeGroupY / 2 : computeGroupY;
+            if (computeGroupY == 1 && computeGroupX > 1) computeGroupX /= 2;
+        }
 
         if (lockDiskToIsco) {
             // The ISCO moves with the spin: prograde orbits reach far closer

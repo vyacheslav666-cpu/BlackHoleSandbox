@@ -19,6 +19,9 @@ struct RuntimeStats {
     // inferred from the frame rate: vsync, the UI and the rest of the pipeline
     // all sit inside the frame time, and none of them belong in this number.
     int blackHoleFrames = 0;
+    // False when the driver cannot give a compute stage screen-space
+    // derivatives, in which case only the fragment tracer exists.
+    bool computeTracerAvailable = false;
     double blackHoleLastMs = 0.0;
     double blackHoleMedianMs = 0.0;
     double blackHoleP95Ms = 0.0;

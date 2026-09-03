@@ -110,6 +110,14 @@ private:
     physics::BlackHoleParameters parameters_;
 
     renderer::ShaderProgram blackHoleProgram_;
+    // The same tracer compiled as a compute shader.  Both are built every run so
+    // that a single binary can be measured either way; computeTracerAvailable_
+    // is false when the driver cannot supply derivatives to a compute stage, in
+    // which case only the fragment path exists.
+    renderer::ShaderProgram blackHoleComputeProgram_;
+    bool computeTracerAvailable_ = false;
+    int computeGroupXCompiled_ = 8;
+    int computeGroupYCompiled_ = 8;
     renderer::ShaderProgram accumulateProgram_;
     renderer::ShaderProgram bloomDownsampleProgram_;
     renderer::ShaderProgram bloomUpsampleProgram_;
