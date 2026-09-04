@@ -397,6 +397,50 @@ so `E = 1`.
 * Rays are terminated at the horizon. Kerr–Schild would happily integrate
   through it, but there is nothing to render inside.
 
+**Where the ray stops, and which direction it hands over — NUMERICAL.** Two
+corrections, both about the escape rather than the trajectory, and both mirroring
+what §2.4 does for the planar solver.
+
+The step is adaptive — a quarter of the current radius — so declaring the ray
+escaped wherever a step happened to leave it past `uEscapeRadius` made the
+reported radius depend on the whole history of the schedule. The last step is now
+aimed at that sphere: out there the trajectory is nearly straight, so where the
+chord crosses is a quadratic worth solving outright. It is gated on `r + h·|dx/dλ|`
+reaching the sphere, which is false on every step of a ray but the last.
+
+The direction was the coordinate velocity `dx^i/dλ`, handed to a starfield that
+is sampled as a flat sky — two different geometries asked to agree. What the
+frame wants is the direction the **normal (Eulerian) observer** of the
+Kerr–Schild slicing measures, which is `kerrBegin`'s construction at the camera
+run backwards. With lapse `α = 1/√(1+f)` and shift `β^i = f l^i/(1+f)`, that
+observer is `n^μ = (1/α, −β^i/α)`, measures `E = −p_μ n^μ`, and sees the photon
+along `p^i/E − n^i`; since the energy is normalised so `p_t = −1`, `E/α` collapses
+to `(1+f)(1 + p_i β^i)`. The result is then flattened out of the spatial metric
+`γ_ij = δ_ij + f l_i l_j` by stretching the component along `l` by `√(1+f)` —
+which is what makes it a direction on a flat sky rather than a set of coordinate
+components.
+
+Measured with the emission isolated (debug view 9, which renders no sky at all),
+both corrections leave the disk and jet **byte-identical**; the entire change is
+in the background, which is what they are for. Against the previous images the
+landing costs RMSE 0.0005–0.0009 and the direction 0.015–0.048, both measured on
+debug view 8. Render time is within measurement noise, about +1%, entirely from
+the per-step gate — the aiming itself runs once per ray.
+
+Note that the normal observer is still not the *static* one, which is what a sky
+fixed at infinity would strictly want; the two differ by `O(r_s/r)` as well, and
+that is the same residual the escape radius already neglects. Both ends of a ray
+are at least now read in the same frame.
+
+**Known discrepancy, not fixed here.** The two solvers do not agree in the limit,
+contrary to the note above: at `a* = 2×10⁻⁴` the Kerr path and the planar path at
+`a* = 0` differ by RMSE 0.21 over 73% of the frame, and these corrections change
+that by nothing. The suspected cause is at the *camera* end rather than the
+escape — the planar solver reads the camera ray as a static observer's
+measurement while the Kerr solver reads it as the normal observer's, and at
+`r = 14` those two frames differ by `β ≈ 0.07c`, which aberrates the whole image.
+That has not been confirmed.
+
 ---
 
 ## 3. The accretion disk

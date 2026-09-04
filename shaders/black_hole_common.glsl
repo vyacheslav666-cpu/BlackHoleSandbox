@@ -1756,6 +1756,45 @@ TraceResult traceSchwarzschild(vec3 rayOrigin, vec3 initialDirection, bool ignor
 // step is taken in the affine parameter, because with rotation there is no
 // single orbital plane whose angle could serve as one.
 
+// Direction the normal (Eulerian) observer of the Kerr-Schild slicing measures
+// for a photon, as a unit vector in that observer's own orthonormal frame.
+//
+// The integrator carries dx^i/dlambda, which is a *coordinate* velocity, while
+// the starfield is sampled as a flat sky -- handing it the coordinate velocity
+// asks two different geometries to agree. The gap is only O(r_s/r), but at the
+// default escape radius that is more than a pixel at 720p, which is exactly what
+// it cost the Schwarzschild solver.
+//
+// Undoing the 3+1 split is the construction kerrBegin performs at the camera,
+// run backwards. With lapse alpha = 1/sqrt(1+f) and shift beta^i = f l^i/(1+f),
+// the normal observer is n^mu = (1/alpha, -beta^i/alpha); it measures energy
+// E = -p_mu n^mu, and the direction is p^i/E - n^i. Because the energy has been
+// normalised so that p_t = -1, E/alpha collapses to (1+f)(1 + p_i beta^i) and
+// the whole thing is a handful of dot products.
+//
+// The last line is what makes the result a direction on a *flat* sky rather than
+// a set of coordinate components: the spatial metric is gamma_ij = delta_ij +
+// f l_i l_j, so an orthonormal frame is reached by stretching the component
+// along l by sqrt(1+f) and leaving the perpendicular ones alone.
+//
+// This is the same observer family the camera end already uses, so both ends of
+// every ray are now read in the same frame. It is still not the static observer,
+// which is what a sky fixed at infinity would strictly want; the two differ by
+// O(r_s/r) as well, and that residual is the one the escape radius already
+// documents as neglected.
+vec3 kerrObservedDirection(vec3 position, vec3 momentum, vec3 dPosition,
+                           float mass, float a)
+{
+    KerrSchildField field = kerrSchildField(position, mass, a);
+    float onePlusF = 1.0 + field.f;
+    vec3 shift = field.f * field.l / onePlusF;
+
+    float energyOverLapse = onePlusF * (1.0 + dot(momentum, shift));
+    vec3 measured = dPosition + energyOverLapse * shift;
+    measured += (sqrt(onePlusF) - 1.0) * dot(field.l, measured) * field.l;
+    return normalize(spinFrameToWorld(measured));
+}
+
 // =============================================================================
 // The Kerr tracer, in three parts
 // =============================================================================
@@ -1871,7 +1910,7 @@ void kerrFinish(inout KerrRay ray, inout TraceResult trace)
     kerrSchildDerivatives(position, momentum, energy, mass, a, dPosition, dMomentum);
     float radialRate = dot(normalize(position), dPosition);
     trace.state = radialRate < 0.0 ? kTraceCaptured : kTraceExhausted;
-    trace.escapeDirection = normalize(spinFrameToWorld(dPosition));
+    trace.escapeDirection = kerrObservedDirection(position, momentum, dPosition, mass, a);
 }
 
 // Advances the ray by at most `budget` steps. Returns true once it is finished:
@@ -1904,6 +1943,10 @@ bool kerrAdvance(inout KerrRay ray, inout TraceResult trace, bool ignoreDisk, in
     float energy = 1.0;
     // The previous point is where the last completed step left the ray, which is
     // exactly where it is now -- so a chunk boundary needs nothing carried over.
+    // |position| exceeds r by at most a^2/2r, so a margin of a makes a test on r
+    // a safe stand-in for one on |position|. Hoisted: it is loop-invariant.
+    float escapeGate = escapeRadius - abs(a);
+
     vec3 previousWorld = spinFrameToWorld(position);
     vec3 dPosition = vec3(0.0);
     vec3 dMomentum = vec3(0.0);
@@ -1942,6 +1985,44 @@ bool kerrAdvance(inout KerrRay ray, inout TraceResult trace, bool ignoreDisk, in
         }
         h = clamp(h, 1e-4 * rs, 6.0 * max(r, rs));
 
+        // Aim the last step at the escape radius exactly.
+        //
+        // Below, the ray is declared escaped wherever the step happened to leave
+        // it past escapeRadius -- and the step is adaptive, a quarter of the
+        // current radius, so that landing point depends on the entire history of
+        // the schedule. Every ray was reporting its direction from a slightly
+        // different radius, and any change to the stepping moved all of them.
+        // On a starfield that is the most visible error the renderer can make.
+        // It is the same fault the Schwarzschild solver had, fixed the same way.
+        //
+        // The trajectory is very nearly straight this far out, so where the
+        // chord crosses the sphere is a quadratic worth solving outright rather
+        // than creeping up on. position and dPosition are in the spin frame, but
+        // spinFrameToWorld only permutes and negates axes, so radii and dot
+        // products are the same in both.
+        // The step can only cross the sphere if it is long enough to reach it,
+        // and that rules it out on every step of a ray but the last. The test is
+        // written against r, which is already in hand, rather than |position|,
+        // which would cost another dot product on every step of every ray: the
+        // two differ by at most a^2/2r, so escapeGate carries a margin of a and
+        // the gate stays conservative. Where it does not fire, the aiming below
+        // would have been a no-op anyway -- an unreachable sphere gives
+        // toEscape > h.
+        if (r + h * speed >= escapeGate)
+        {
+            float alongRadius = dot(position, dPosition);
+            float outside = dot(position, position) - escapeRadius * escapeRadius;
+            float discriminant = alongRadius * alongRadius - speed * speed * outside;
+            if (outside < 0.0 && alongRadius > 0.0 && discriminant > 0.0)
+            {
+                float toEscape = (-alongRadius + sqrt(discriminant)) / (speed * speed);
+                // Floored, so a step that only ever approaches the sphere cannot
+                // burn the budget creeping towards it. The residual overshoot is
+                // then under a thousandth of r_s however the ray arrived.
+                h = min(h, max(toEscape, 1.0e-3 * rs / speed));
+            }
+        }
+
         kerrSchildStepRk4(position, momentum, energy, h, mass, a);
         trace.steps = trace.steps + 1;
 
@@ -1959,8 +2040,8 @@ bool kerrAdvance(inout KerrRay ray, inout TraceResult trace, bool ignoreDisk, in
                 trace.state = kTraceEscaped;
                 trace.escapeDirection = normalize(currentWorld - previousWorld);
                 ray.position = position;
-            ray.momentum = momentum;
-            return true;
+                ray.momentum = momentum;
+                return true;
             }
         }
 
@@ -1977,9 +2058,8 @@ bool kerrAdvance(inout KerrRay ray, inout TraceResult trace, bool ignoreDisk, in
         {
             trace.state = kTraceEscaped;
             kerrSchildDerivatives(position, momentum, energy, mass, a, dPosition, dMomentum);
-            // dx/dlambda is already a Cartesian velocity -- no Jacobian needed,
-            // which is another small dividend of using Kerr-Schild.
-            trace.escapeDirection = normalize(spinFrameToWorld(dPosition));
+            trace.escapeDirection =
+                kerrObservedDirection(position, momentum, dPosition, mass, a);
             ray.position = position;
             ray.momentum = momentum;
             return true;
