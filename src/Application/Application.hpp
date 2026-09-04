@@ -62,6 +62,10 @@ private:
     void resetAccumulation();
 
     int runCapture();
+    int runSequence();
+    // Accumulates one still at `animationTime` into captureTarget_ and writes it.
+    [[nodiscard]] bool renderStillTo(const std::filesystem::path& path, float animationTime,
+                                     int samples);
 
     [[nodiscard]] std::filesystem::path findShaderDirectory() const;
     [[nodiscard]] bool risingKeyPress(int key, bool& priorState) const;
