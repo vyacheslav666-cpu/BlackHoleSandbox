@@ -432,14 +432,58 @@ fixed at infinity would strictly want; the two differ by `O(r_s/r)` as well, and
 that is the same residual the escape radius already neglects. Both ends of a ray
 are at least now read in the same frame.
 
-**Known discrepancy, not fixed here.** The two solvers do not agree in the limit,
-contrary to the note above: at `a* = 2×10⁻⁴` the Kerr path and the planar path at
-`a* = 0` differ by RMSE 0.21 over 73% of the frame, and these corrections change
-that by nothing. The suspected cause is at the *camera* end rather than the
-escape — the planar solver reads the camera ray as a static observer's
-measurement while the Kerr solver reads it as the normal observer's, and at
-`r = 14` those two frames differ by `β ≈ 0.07c`, which aberrates the whole image.
-That has not been confirmed.
+**One frame, both ends, both solvers — DERIVED.** The two solvers used to
+disagree badly in the limit: at `a* = 2×10⁻⁴` the Kerr path and the planar path
+at `a* = 0` differed by RMSE 0.21 over 73% of the frame. Three different
+observers were in play at once.
+
+At the *camera*, the planar solver reads the ray as a **static** observer's
+measurement — that is where `b = r sin(α)/√(1 − r_s/r)` comes from — while the
+Kerr solver read it as the **normal (Eulerian)** observer's. Those two frames
+differ by `β ≈ 0.07c` at `r = 14`, so the whole image was aberrated as though the
+camera were falling inwards. It is not: the orbit camera is held at a fixed
+coordinate position, so static is not merely the consistent choice but the
+correct one. A static observer has `u^μ = (1/√(1−f), 0, 0, 0)`, timelike only
+while `f < 1` — outside the ergosphere — and its rest space carries
+
+```
+    h_ij = δ_ij + [f/(1−f)] l_i l_j
+```
+
+which follows from imposing `g(u, e) = 0` on `e = A ∂_t + V^i ∂_i`: that fixes
+`A = [f/(1−f)] l·V` and leaves exactly this norm on `V`. Coordinate components of
+a measured direction therefore come from *undoing* the stretch along `l`, and the
+photon is `p^μ = u^μ + N^μ` with `N = (A, V)`. At `a = 0` this returns
+`E = √(1 − r_s/r)` and `L = r sin(α)`, hence the planar solver's own `b` — the
+two constructions are the same one. Inside the ergosphere, where nothing can
+stand still, the frame falls back to the normal observer.
+
+At the *escape*, the planar solver was reporting the coordinate direction
+`(dr/dφ, r dφ)` and the Kerr solver the normal observer's. Both now report what a
+static observer measures: for the planar solver that means stretching the radial
+leg by `1/√(1 − r_s/r)`, since `r dφ` is already proper; for Kerr it means
+stretching the component along `l` by the same factor, the static observer having
+no spatial velocity of its own to subtract. Static is right here for a second
+reason — the sky is at rest at infinity, so a direction meant to index it has to
+be read in a frame at rest.
+
+The weak-field shortcut needed the *removal* of a correction for this: it always
+produced the locally measured direction and was being rotated onto the old
+coordinate convention. Checked against a reference integration, dropping that
+rotation improves it from about 0.5 px to 0.2 px.
+
+Together these take the solver disagreement from **RMSE 0.21 to 0.0046**, and
+what remains is not a frame error: it splits about evenly between the background
+(0.0054) and the disk emission (0.0043, which no frame convention touches). Two
+different integrators — one marching `φ` through a planar ODE, the other an
+affine parameter through five — sample the turbulent disk at different points and
+land sub-pixel distances apart on the sky. With the star layer suppressed so the
+background is smooth, the residual there falls to 0.0017.
+
+It also runs **3.6–9.7% faster**. The camera is no longer aberrated inwards, so
+fewer rays are beamed into the strong-field region: debug view 2 shows the mean
+step count down 1.3–2.8%, and the timing gains more than that because the rays
+removed are the expensive near-critical ones.
 
 ---
 

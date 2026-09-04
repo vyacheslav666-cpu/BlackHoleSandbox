@@ -423,7 +423,13 @@ vec3 directionInOrbitPlane(float phi, float u, float v, float rs, vec3 radialBas
     float radius = rs / max(u, 1e-6);
     // dr/dphi = d(r_s/u)/dphi = -r_s * v / u^2
     float drDphi = -rs * v / max(u * u, 1e-8);
-    return normalize(drDphi * er + radius * ephi);
+    // Read in the frame of a static observer, which measures proper radial
+    // distance dr/sqrt(1 - r_s/r) while the tangential leg r dphi is already
+    // proper. Without the stretch this returns the *coordinate* direction, a
+    // different vector by O(r_s/r) -- over a pixel at the default escape radius,
+    // and the reason the two solvers used to disagree at the far end.
+    float stretch = inversesqrt(max(1.0 - u, 1e-5));
+    return normalize(drDphi * stretch * er + radius * ephi);
 }
 
 // =============================================================================
@@ -1521,29 +1527,9 @@ TraceResult traceSchwarzschild(vec3 rayOrigin, vec3 initialDirection, bool ignor
                 float cosineAtEscape = sqrt(max(1.0 - sineAtEscape * sineAtEscape, 0.0));
                 float bend = max(0.5 * totalDeflection * (cosineAtEscape - radialComponent), 0.0);
 
-                // The integrator does not hand the starfield the direction a
-                // static observer at the escape radius would measure. It hands
-                // it dx/dphi in Schwarzschild coordinates, and the two differ by
-                // the lapse on the radial component alone:
-                //
-                //     sin psi_local = (b/r) sqrt(1 - r_s/r)
-                //     sin psi_coord = b / sqrt(r^2 + b^2 r_s/r)
-                //
-                // The gap is only O(r_s/r), but at the default escape radius it
-                // is still 1.2e-3 rad -- more than a pixel at 720p, and enough
-                // to visibly shift a star. Both angles are measured from the
-                // same radius vector in the same plane, so the difference is
-                // just extra rotation in the same sense as the deflection, and
-                // the endpoint's radius vector never has to be worked out.
-                float lapseAtEscape = max(1.0 - rs / escapeRadius, 0.0);
-                float sineLocal = (impactParameter / escapeRadius) * sqrt(lapseAtEscape);
-                float sineCoordinate =
-                    impactParameter * inversesqrt(escapeRadius * escapeRadius
-                                                  + impactParameter * impactParameter * rs
-                                                        / escapeRadius);
-                bend += asin(clamp(sineCoordinate, -1.0, 1.0))
-                      - asin(clamp(sineLocal, -1.0, 1.0));
-
+                // No coordinate conversion here any more: directionInOrbitPlane
+                // now reports what a static observer measures, which is what the
+                // rotation below already produces. The two agree by construction.
                 // Unit vector perpendicular to the ray, pointing at the hole:
                 // the direction the deflection turns towards.
                 vec3 inward = -tangentLength * radialBasis + radialComponent * azimuthBasis;
@@ -1756,42 +1742,37 @@ TraceResult traceSchwarzschild(vec3 rayOrigin, vec3 initialDirection, bool ignor
 // step is taken in the affine parameter, because with rotation there is no
 // single orbital plane whose angle could serve as one.
 
-// Direction the normal (Eulerian) observer of the Kerr-Schild slicing measures
-// for a photon, as a unit vector in that observer's own orthonormal frame.
+// Direction a static observer at this point measures for the photon, as a unit
+// vector in that observer's own orthonormal frame.
 //
 // The integrator carries dx^i/dlambda, which is a *coordinate* velocity, while
-// the starfield is sampled as a flat sky -- handing it the coordinate velocity
+// the starfield is sampled as a flat sky -- handing over the coordinate velocity
 // asks two different geometries to agree. The gap is only O(r_s/r), but at the
-// default escape radius that is more than a pixel at 720p, which is exactly what
-// it cost the Schwarzschild solver.
+// default escape radius that is more than a pixel at 720p.
 //
-// Undoing the 3+1 split is the construction kerrBegin performs at the camera,
-// run backwards. With lapse alpha = 1/sqrt(1+f) and shift beta^i = f l^i/(1+f),
-// the normal observer is n^mu = (1/alpha, -beta^i/alpha); it measures energy
-// E = -p_mu n^mu, and the direction is p^i/E - n^i. Because the energy has been
-// normalised so that p_t = -1, E/alpha collapses to (1+f)(1 + p_i beta^i) and
-// the whole thing is a handful of dot products.
+// A static observer has no spatial velocity, so the coordinate components of the
+// direction it measures are just p^i; all that remains is to leave the spatial
+// metric. Its rest space carries h_ij = delta_ij + [f/(1-f)] l_i l_j, so an
+// orthonormal frame is reached by stretching the component along l by
+// 1/sqrt(1-f) and leaving the perpendicular ones alone.
 //
-// The last line is what makes the result a direction on a *flat* sky rather than
-// a set of coordinate components: the spatial metric is gamma_ij = delta_ij +
-// f l_i l_j, so an orthonormal frame is reached by stretching the component
-// along l by sqrt(1+f) and leaving the perpendicular ones alone.
-//
-// This is the same observer family the camera end already uses, so both ends of
-// every ray are now read in the same frame. It is still not the static observer,
-// which is what a sky fixed at infinity would strictly want; the two differ by
-// O(r_s/r) as well, and that residual is the one the escape radius already
-// documents as neglected.
-vec3 kerrObservedDirection(vec3 position, vec3 momentum, vec3 dPosition,
-                           float mass, float a)
+// Static is the right frame here rather than merely a consistent one: the sky is
+// at rest at infinity, so a direction meant to index it has to be read in a
+// frame at rest too. It is also the frame the camera end uses and the frame the
+// planar solver uses, which is what lets the two solvers agree.
+vec3 kerrObservedDirection(vec3 position, vec3 dPosition, float mass, float a)
 {
     KerrSchildField field = kerrSchildField(position, mass, a);
-    float onePlusF = 1.0 + field.f;
-    vec3 shift = field.f * field.l / onePlusF;
-
-    float energyOverLapse = onePlusF * (1.0 + dot(momentum, shift));
-    vec3 measured = dPosition + energyOverLapse * shift;
-    measured += (sqrt(onePlusF) - 1.0) * dot(field.l, measured) * field.l;
+    float staticNorm = 1.0 - field.f;
+    if (staticNorm <= 1.0e-4)
+    {
+        // Inside the ergosphere there is no static frame to read. Such a ray is
+        // on its way through the horizon and its background is multiplied out
+        // anyway, so the raw coordinate velocity is a good enough placeholder.
+        return normalize(spinFrameToWorld(dPosition));
+    }
+    vec3 measured = dPosition
+                  + (inversesqrt(staticNorm) - 1.0) * dot(field.l, dPosition) * field.l;
     return normalize(spinFrameToWorld(measured));
 }
 
@@ -1850,28 +1831,53 @@ KerrRay kerrBegin(vec3 rayOrigin, vec3 initialDirection, out TraceResult trace, 
 
     KerrSchildField field = kerrSchildField(position, mass, a);
 
-    // The camera is treated as the *normal* (Eulerian) observer of the 3+1
-    // split -- the Kerr-Schild counterpart of a ZAMO, and the observer that
-    // stays well defined inside the ergosphere where nothing can remain static.
-    // Its four-velocity is
-    //     u^mu = sqrt(1+f) * ( 1, -f l / (1+f) )
-    // and vectors orthogonal to it are exactly those with no time component,
-    // which is what makes the construction below short.
-    float onePlusF = 1.0 + field.f;
-    float lapse = sqrt(onePlusF);
-    vec3 uSpatialUp = -lapse * field.f * field.l / onePlusF;  // u^i
-
-    // Spatial metric is g_ij = delta_ij + f l_i l_j, so the induced norm is
-    //     <A,B> = A.B + f (l.A)(l.B)
-    // Normalising the viewing direction under it gives a genuinely unit
-    // spatial direction for this observer.
+    // ---- Which observer is holding the camera ------------------------------
+    // The camera sits at a fixed coordinate position and looks at the hole: it
+    // is *static*, and the ray direction handed in is what a static observer
+    // measures in its own orthonormal frame. That is also exactly what the
+    // planar solver assumes, and it is the reason the two now agree in the
+    // limit -- see below.
+    //
+    // A static observer has u^mu = (1/sqrt(1-f), 0, 0, 0), which is timelike
+    // only while f < 1, that is, outside the ergosphere. Its rest space carries
+    // the induced metric
+    //     h_ij = delta_ij + [f/(1-f)] l_i l_j
+    // (found by imposing g(u, e) = 0 on e = A d_t + V^i d_i, which fixes
+    // A = [f/(1-f)] l.V and leaves that norm on V). So the coordinate
+    // components of a direction come from *undoing* the stretch along l, and
+    // the photon is p^mu = u^mu + N^mu with N = (A, V).
+    //
+    // At a = 0 this reproduces b = r sin(alpha)/sqrt(1 - r_s/r) exactly, which
+    // is the planar solver's own expression: the conserved energy comes out as
+    // sqrt(1 - r_s/r) and the angular momentum as r sin(alpha).
     float lDotD = dot(field.l, rayDirection);
-    float dNorm2 = dot(rayDirection, rayDirection) + field.f * lDotD * lDotD;
-    vec3 spatialUp = rayDirection * inversesqrt(max(dNorm2, 1e-12));            // n^i
+    float pTimeUp;
+    vec3 pSpaceUp;
 
-    // Photon with unit locally measured energy: p^mu = u^mu + n^mu.
-    float pTimeUp = lapse;                                   // p^t
-    vec3 pSpaceUp = uSpatialUp + spatialUp;                  // p^i
+    float staticNorm = 1.0 - field.f;   // -g_tt, positive outside the ergosphere
+    if (staticNorm > 1.0e-4)
+    {
+        float stretch = field.f / staticNorm;
+        vec3 spaceDir = rayDirection
+                      - (1.0 - inversesqrt(1.0 + stretch)) * lDotD * field.l;
+        pTimeUp = inversesqrt(staticNorm) + stretch * dot(field.l, spaceDir);
+        pSpaceUp = spaceDir;
+    }
+    else
+    {
+        // Inside the ergosphere no observer can stand still, so the frame falls
+        // back to the *normal* (Eulerian) observer of the 3+1 split, which stays
+        // well defined everywhere outside the horizon:
+        //     u^mu = sqrt(1+f) * ( 1, -f l / (1+f) )
+        // The image is then aberrated by that observer's infall, but it exists,
+        // which the static frame does not.
+        float onePlusF = 1.0 + field.f;
+        float lapse = sqrt(onePlusF);
+        float dNorm2 = dot(rayDirection, rayDirection) + field.f * lDotD * lDotD;
+        pTimeUp = lapse;
+        pSpaceUp = -lapse * field.f * field.l / onePlusF
+                 + rayDirection * inversesqrt(max(dNorm2, 1e-12));
+    }
 
     // Lower the indices with g_mu_nu = eta_mu_nu + f l_mu l_nu, remembering
     // l_t = 1 so the contraction l_mu p^mu is (p^t + l.p^i).
@@ -1910,7 +1916,7 @@ void kerrFinish(inout KerrRay ray, inout TraceResult trace)
     kerrSchildDerivatives(position, momentum, energy, mass, a, dPosition, dMomentum);
     float radialRate = dot(normalize(position), dPosition);
     trace.state = radialRate < 0.0 ? kTraceCaptured : kTraceExhausted;
-    trace.escapeDirection = kerrObservedDirection(position, momentum, dPosition, mass, a);
+    trace.escapeDirection = kerrObservedDirection(position, dPosition, mass, a);
 }
 
 // Advances the ray by at most `budget` steps. Returns true once it is finished:
@@ -2058,8 +2064,7 @@ bool kerrAdvance(inout KerrRay ray, inout TraceResult trace, bool ignoreDisk, in
         {
             trace.state = kTraceEscaped;
             kerrSchildDerivatives(position, momentum, energy, mass, a, dPosition, dMomentum);
-            trace.escapeDirection =
-                kerrObservedDirection(position, momentum, dPosition, mass, a);
+            trace.escapeDirection = kerrObservedDirection(position, dPosition, mass, a);
             ray.position = position;
             ray.momentum = momentum;
             return true;
