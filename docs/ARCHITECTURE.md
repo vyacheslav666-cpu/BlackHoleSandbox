@@ -141,7 +141,7 @@ blurred coarse level and the fixed-function blend unit does the combine.
 
 ---
 
-## Two entry paths, one renderer
+## Three entry paths, one renderer
 
 `Application::run()` branches once:
 
@@ -150,6 +150,20 @@ blurred coarse level and the fixed-function blend unit does the combine.
 * **Capture** (`--shot`) — hidden window, still a real GL context, render
   `--samples` accumulated frames, postprocess into `captureTarget_`, read back,
   flip rows (GL is bottom-up, PNG is top-down), write PNG, exit.
+* **Sequence** (`--sequence`) — the same still, once per frame, each on its own
+  animation clock with the accumulator reset in between. This is the only way to
+  see the disk in motion *and* converged: interactively the clock is frozen
+  while the image refines (`freezeAnimationWhileRefining`), because otherwise
+  the pattern would move under the running average and smear it. The trade is
+  unavoidable in real time and disappears offline.
+
+  A frame's clock is computed from its index, never advanced from the frame
+  before. Nothing in the renderer integrates state across frames — the disk's
+  rotation, the accretion inflow and the jet knots are all closed forms in
+  `uTime` — so this is exact rather than merely convenient, and an instant
+  renders identically whatever `--frames` is. Verified: `t = k` is byte-identical
+  as frame `k` of a 6-frame run and frame `2k` of an 11-frame run over the same
+  interval.
 
 Both call the same `renderScene` / `accumulateScene` / `renderBloom` /
 `renderPostprocess`. That is the point: what `--shot` produces is byte-for-byte

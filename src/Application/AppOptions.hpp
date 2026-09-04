@@ -20,6 +20,17 @@ struct AppOptions {
     bool capture = false;
     std::filesystem::path capturePath;
     int captureSamples = 96; // Progressive-refinement frames before readback.
+    // Offscreen animation.  Renders `sequenceFrames` stills into a directory,
+    // each one accumulated to convergence at its own value of the animation
+    // clock, which is what the interactive renderer cannot do: there the clock
+    // is frozen while the image refines, so a moving frame is always the noisy
+    // one.
+    bool sequence = false;
+    std::filesystem::path sequenceDirectory;
+    int sequenceFrames = 24;
+    float sequenceTimeStart = 0.0f;
+    float sequenceTimeEnd = 12.0f;
+
     // Draw the ImGui panel and help overlay into the captured image too.
     // Useful for documentation shots, and it renders offscreen, so it does not
     // depend on the window being visible or unobscured.

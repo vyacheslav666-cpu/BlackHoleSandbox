@@ -55,6 +55,19 @@ Render a still without opening a window:
 ./out/build/ninja-msvc/bin/BlackHoleSandbox.exe --shot render.png --width 1920 --height 1080 --samples 200 --quality ultra
 ```
 
+Render an animation, one converged still per frame:
+
+```powershell
+./out/build/ninja-msvc/bin/BlackHoleSandbox.exe --sequence out/anim --frames 24 --time-start 0 --time-end 8 --samples 64
+```
+
+The interactive renderer cannot show this. It freezes the animation clock while
+the image refines, so anything in motion is only ever seen at one frame of
+refinement — clean *or* moving, never both. Offline, each frame resets the
+accumulator and converges on its own clock. Frame times come from the frame
+index rather than being advanced frame to frame, so a given instant renders
+identically whatever `--frames` is set to.
+
 Or render every viewpoint and debug view at once:
 
 ```powershell

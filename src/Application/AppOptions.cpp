@@ -128,6 +128,16 @@ std::string commandLineHelp() {
            "  --samples N           Progressive-refinement frames before readback (default 96).\n"
            "  --with-ui             Draw the control panel and help overlay into the image.\n"
            "  --width N --height N  Output resolution (default 1600x900).\n\n"
+           "Offscreen animation:\n"
+           "  --sequence <dir>      Render a numbered still per frame into <dir>.\n"
+           "  --frames N            Frames in the sequence (default 24).\n"
+           "  --time-start T        Animation clock on the first frame (default 0).\n"
+           "  --time-end T          Animation clock on the last frame (default 12).\n"
+           "                        Both endpoints are included, and every frame is\n"
+           "                        accumulated to --samples on its own clock. The\n"
+           "                        interactive renderer cannot do this: it freezes the\n"
+           "                        clock while the image refines, so anything moving is\n"
+           "                        only ever seen at one frame of refinement.\n\n"
            "Camera (orbit mode):\n"
            "  --distance R          Orbit radius in scene units (default 14).\n"
            "  --yaw D --pitch D     Orbit angles in degrees (default -90 / -9).\n"
@@ -179,6 +189,15 @@ AppOptions parseCommandLine(int argc, char** argv) {
         } else if (arg == "--shot") {
             options.capture = true;
             options.capturePath = std::filesystem::path(next(i, arg));
+        } else if (arg == "--sequence") {
+            options.sequence = true;
+            options.sequenceDirectory = std::filesystem::path(next(i, arg));
+        } else if (arg == "--frames") {
+            options.sequenceFrames = toInt(next(i, arg), arg);
+        } else if (arg == "--time-start") {
+            options.sequenceTimeStart = toFloat(next(i, arg), arg);
+        } else if (arg == "--time-end") {
+            options.sequenceTimeEnd = toFloat(next(i, arg), arg);
         } else if (arg == "--with-ui") {
             options.captureWithUi = true;
         } else if (arg == "--samples") {
@@ -225,6 +244,7 @@ AppOptions parseCommandLine(int argc, char** argv) {
     options.width = options.width < 16 ? 16 : options.width;
     options.height = options.height < 16 ? 16 : options.height;
     options.captureSamples = options.captureSamples < 1 ? 1 : options.captureSamples;
+    options.sequenceFrames = options.sequenceFrames < 1 ? 1 : options.sequenceFrames;
     options.parameters.sanitize();
     return options;
 }

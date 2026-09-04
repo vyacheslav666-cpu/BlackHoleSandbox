@@ -108,6 +108,10 @@ Application::~Application() { shutdown(); }
 // =============================================================================
 
 void Application::initialize() {
+    // --shot and --sequence are both offscreen: they need a real GL context but
+    // never a visible window.
+    const bool offscreen = options_.capture || options_.sequence;
+
     glfwSetErrorCallback(glfwErrorCallback);
     if (glfwInit() == GLFW_FALSE) {
         throw std::runtime_error("GLFW could not initialize");
@@ -119,7 +123,7 @@ void Application::initialize() {
     glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
     glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE);
     // A capture run still needs a real GL context, but never needs to be seen.
-    if (options_.capture) {
+    if (offscreen) {
         glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
     }
 
@@ -128,7 +132,7 @@ void Application::initialize() {
     // no longer matches what the renderer and the UI were laid out for.
     int windowWidth = options_.width;
     int windowHeight = options_.height;
-    if (!options_.capture) {
+    if (!offscreen) {
         if (GLFWmonitor* monitor = glfwGetPrimaryMonitor()) {
             int workX = 0;
             int workY = 0;
@@ -149,7 +153,7 @@ void Application::initialize() {
         throw std::runtime_error("Could not create an OpenGL 4.6 core window");
     }
     glfwMakeContextCurrent(window_);
-    glfwSwapInterval(options_.capture ? 0 : (parameters_.vsync ? 1 : 0));
+    glfwSwapInterval(offscreen ? 0 : (parameters_.vsync ? 1 : 0));
 
     if (gladLoadGL(static_cast<GLADloadfunc>(glfwGetProcAddress)) == 0) {
         glfwDestroyWindow(window_);
@@ -190,7 +194,7 @@ void Application::initialize() {
     glfwSetScrollCallback(window_, scrollCallback);
     glfwSetMouseButtonCallback(window_, mouseButtonCallback);
     glfwGetFramebufferSize(window_, &framebufferWidth_, &framebufferHeight_);
-    if (options_.capture) {
+    if (offscreen) {
         // A hidden window may report a zero-sized framebuffer; the capture path
         // renders at the requested resolution regardless.
         framebufferWidth_ = options_.width;
@@ -199,7 +203,7 @@ void Application::initialize() {
 
     // A capture run normally skips the UI entirely; --with-ui asks for it to be
     // drawn into the image anyway.
-    if (!options_.capture || options_.captureWithUi) {
+    if (!offscreen || options_.captureWithUi) {
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO();
@@ -254,7 +258,7 @@ void Application::initialize() {
     camera_.setOrbitAngles(options_.cameraYawDegrees, options_.cameraPitchDegrees);
     camera_.setVerticalFovDegrees(options_.fovDegrees);
 
-    if (!options_.capture) {
+    if (!offscreen) {
         setMouseCaptured(false);
     }
     initialized_ = true;
@@ -902,6 +906,9 @@ void Application::renderPostprocess(unsigned int sceneTexture, unsigned int targ
 // =============================================================================
 
 int Application::run() {
+    if (options_.sequence) {
+        return runSequence();
+    }
     if (options_.capture) {
         return runCapture();
     }
@@ -975,6 +982,118 @@ int Application::run() {
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         glfwSwapBuffers(window_);
     }
+    return 0;
+}
+
+// Accumulates one converged still at `animationTime` and writes it out.
+//
+// Shared by --shot and --sequence: the only thing a sequence changes is that it
+// does this many times with a different clock each time.  The accumulator is
+// reset first, which is the whole point of rendering a sequence offline -- the
+// interactive path freezes the clock while it refines, so a frame that is moving
+// is always the noisy one.
+bool Application::renderStillTo(const std::filesystem::path& path, float animationTime,
+                                int samples) {
+    resetAccumulation();
+    unsigned int displayTexture = sceneTarget_.texture();
+    for (int sample = 0; sample < samples; ++sample) {
+        renderScene(animationTime);
+        displayTexture = accumulateScene();
+    }
+
+    renderBloom(displayTexture);
+    renderPostprocess(displayTexture, captureTarget_.framebuffer(), framebufferWidth_,
+                      framebufferHeight_);
+    glFinish();
+
+    // Read back the LDR result.  OpenGL's origin is bottom-left and PNG's is
+    // top-left, so the rows are reversed while copying into the RGB buffer.
+    const std::size_t pixelCount =
+        static_cast<std::size_t>(framebufferWidth_) * static_cast<std::size_t>(framebufferHeight_);
+    std::vector<std::uint8_t> rgba(pixelCount * 4u);
+    glBindFramebuffer(GL_FRAMEBUFFER, captureTarget_.framebuffer());
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, framebufferWidth_, framebufferHeight_, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+
+    std::vector<std::uint8_t> rgb(pixelCount * 3u);
+    for (int y = 0; y < framebufferHeight_; ++y) {
+        const int sourceRow = framebufferHeight_ - 1 - y;
+        for (int x = 0; x < framebufferWidth_; ++x) {
+            const std::size_t src = (static_cast<std::size_t>(sourceRow) * framebufferWidth_ + x) * 4u;
+            const std::size_t dst = (static_cast<std::size_t>(y) * framebufferWidth_ + x) * 3u;
+            rgb[dst + 0] = rgba[src + 0];
+            rgb[dst + 1] = rgba[src + 1];
+            rgb[dst + 2] = rgba[src + 2];
+        }
+    }
+
+    if (!renderer::writePng(path, framebufferWidth_, framebufferHeight_, rgb)) {
+        std::cerr << "Could not write " << path.string() << '\n';
+        return false;
+    }
+    return true;
+}
+
+int Application::runSequence() {
+    framebufferWidth_ = options_.width;
+    framebufferHeight_ = options_.height;
+    resizePending_ = true;
+    createOrResizeRenderTargets();
+    captureTarget_.resize(framebufferWidth_, framebufferHeight_, renderer::TargetFormat::Rgba8);
+
+    const int frames = std::max(1, options_.sequenceFrames);
+    const int samples = std::max(1, options_.captureSamples);
+    const float startTime = options_.sequenceTimeStart;
+    const float endTime = options_.sequenceTimeEnd;
+
+    std::error_code directoryError;
+    std::filesystem::create_directories(options_.sequenceDirectory, directoryError);
+    if (directoryError) {
+        std::cerr << "Could not create " << options_.sequenceDirectory.string() << ": "
+                  << directoryError.message() << '\n';
+        return 1;
+    }
+
+    std::cout << "Rendering " << frames << " frames into "
+              << options_.sequenceDirectory.string() << "\n  clock " << startTime << " to "
+              << endTime << ", " << samples << " samples each, " << framebufferWidth_ << 'x'
+              << framebufferHeight_ << "\n";
+
+    for (int frame = 0; frame < frames; ++frame) {
+        // The clock for a frame is computed from the frame index, not advanced
+        // from the frame before it.  Nothing in the renderer integrates state
+        // across frames -- every time-dependent term is a closed form in uTime --
+        // so this is exact rather than merely convenient: frame k lands on the
+        // same instant whatever `frames` happens to be, and a sequence rendered
+        // at one frame count matches the overlapping frames of another.
+        //
+        // Both endpoints are included, so `frames` samples the closed interval
+        // [start, end]; a single-frame sequence sits at the start.
+        const float t = frames > 1
+                            ? startTime + (endTime - startTime) *
+                                              (static_cast<float>(frame) /
+                                               static_cast<float>(frames - 1))
+                            : startTime;
+
+        std::ostringstream name;
+        name << "frame_" << std::setw(4) << std::setfill('0') << frame << ".png";
+        const std::filesystem::path path = options_.sequenceDirectory / name.str();
+
+        // Printed before the frame, and flushed, so a long render shows what it
+        // is working on rather than going quiet.
+        std::cout << "  frame " << (frame + 1) << " / " << frames << "  t = " << std::fixed
+                  << std::setprecision(4) << t << "  -> " << name.str() << std::endl;
+        std::cout.unsetf(std::ios::floatfield);
+
+        if (!renderStillTo(path, t, samples)) {
+            return 1;
+        }
+    }
+
+    blackHoleTimer_.flush();
+    std::cout << "Wrote " << frames << " frames to " << options_.sequenceDirectory.string() << '\n';
+    std::cout << timingReportLine(blackHoleTimer_, framebufferWidth_, framebufferHeight_, samples)
+              << std::endl;
     return 0;
 }
 
